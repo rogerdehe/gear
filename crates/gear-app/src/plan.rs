@@ -195,6 +195,12 @@ pub fn apply(
             let departed = departed_voyages(tx, &ctx.project)?;
             fix_departures(tx, &ctx.project, now)?;
             record_voyages(tx, &ctx.project, draft, &departed, now)?;
+            // M7.3: the measured speed of the lanes' models against the
+            // voyage's eta, on the apply that departs it (or a confirmed one
+            // on a voyage that already departed).
+            if let Some(line) = speed_eta_line(tx, &ctx.project, draft, &guard.0, now)? {
+                result.warnings.push(line);
+            }
             // T-473: a `- drop <milestone>` removes a milestone with no task
             // and no history. It runs after the voyages so a task moved out in
             // this same apply no longer holds it, and after the queue so the
@@ -968,6 +974,8 @@ fn apply_queue(
     // 6. writes.
     let mut created: Vec<String> = Vec::new();
     let mut contract_changed: Vec<(String, i64)> = Vec::new();
+    // M7.3: the tasks whose estimate this apply sets or changes, with it.
+    let mut estimate_changes: Vec<(String, u32)> = Vec::new();
     let mut mentioned: BTreeSet<String> = BTreeSet::new();
     // The lane's repo, the base and the gate (design §1.1): a task keeps the
     // ones it was created with. The config is read once for the whole apply.
@@ -1045,6 +1053,9 @@ fn apply_queue(
                     updated: now,
                 };
                 tx.insert_task(&task)?;
+                if let Some(estimate) = item.estimate {
+                    estimate_changes.push((id.clone(), estimate));
+                }
                 if let Some(work) = member {
                     tx.set_task_feature(project, &id, &work.feature)?;
                 }
@@ -1177,6 +1188,9 @@ fn apply_queue(
                 // The planned time (T-38): the draft may change it; a draft
                 // that says nothing keeps the estimate the task has.
                 if let Some(estimate) = item.estimate {
+                    if task.estimate_min != Some(i64::from(estimate)) {
+                        estimate_changes.push((id.clone(), estimate));
+                    }
                     task.estimate_min = Some(i64::from(estimate));
                 }
                 // The GitHub issue (T-79): a draft that names one sets it; a
@@ -2010,6 +2024,23 @@ fn apply_queue(
     // may need both.
     for warning in shared_file_warnings(tx, project)? {
         warnings.push(warning);
+    }
+
+    // M7.3: an estimate far from the measured speed of the lane's model is
+    // named, never refused.
+    if let Some(config) = &config {
+        if !estimate_changes.is_empty() {
+            let speeds = crate::speed::measured(tx, now)?;
+            for (id, estimate) in estimate_changes {
+                if let Some(warning) =
+                    estimate_warning(tx, config, project, &speeds, &id, estimate)?
+                {
+                    if !warnings.contains(&warning) {
+                        warnings.push(warning);
+                    }
+                }
+            }
+        }
     }
 
     tx.insert_plan(&PlanRow {
@@ -3793,6 +3824,138 @@ fn project_config(tx: &Tx<'_>, project: &str) -> GearResult<Option<crate::config
     Ok(Some(crate::config::parse(&row.config_toml)?))
 }
 
+/// The model a task's lane runs (M7.3): the lane's first `models` entry in the
+/// config (its own override, else the role chain), else the seat's
+/// `engine.model.<seat>`; a captain's task: the captain seat's model, else the
+/// captain chain's first entry.
+fn model_of_task(
+    tx: &Tx<'_>,
+    config: &crate::config::ProjectConfig,
+    project: &str,
+    task: &TaskRow,
+) -> GearResult<Option<String>> {
+    match task.lane.as_deref() {
+        Some(lane) => {
+            if let Some(section) = config.lanes.iter().find(|section| section.name == lane) {
+                if let Some(entry) = section.models.first() {
+                    return Ok(Some(entry.model().to_string()));
+                }
+            }
+            if let Some(entry) = config.models.lanes.first() {
+                return Ok(Some(entry.model().to_string()));
+            }
+            let seat = format!("{project}:{lane}");
+            Ok(tx
+                .get_meta(&format!("engine.model.{seat}"))?
+                .filter(|model| !model.is_empty()))
+        }
+        None => {
+            let seat = tx
+                .captain_of(project)?
+                .map(|seat| seat.id)
+                .unwrap_or_else(|| format!("{project}:captain"));
+            if let Some(model) = tx
+                .get_meta(&format!("engine.model.{seat}"))?
+                .filter(|model| !model.is_empty())
+            {
+                return Ok(Some(model));
+            }
+            Ok(config
+                .models
+                .captain
+                .first()
+                .map(|entry| entry.model().to_string()))
+        }
+    }
+}
+
+/// The warning for an estimate far from the measured speed of its lane's model
+/// (M7.3): more than twice the calibrated minutes, or less than half of them.
+fn estimate_warning(
+    tx: &Tx<'_>,
+    config: &crate::config::ProjectConfig,
+    project: &str,
+    speeds: &[crate::speed::ModelSpeed],
+    task: &str,
+    estimate: u32,
+) -> GearResult<Option<String>> {
+    let Some(row) = tx.get_task(project, task)? else {
+        return Ok(None);
+    };
+    let Some(model) = model_of_task(tx, config, project, &row)? else {
+        return Ok(None);
+    };
+    let Some(calibrated) = crate::speed::calibrated(speeds, &model, estimate) else {
+        return Ok(None);
+    };
+    let Some(speed) = speeds.iter().find(|speed| speed.model == model) else {
+        return Ok(None);
+    };
+    // Far from the measured speed: more than twice the model's median work
+    // time, or less than half of it. (The calibrated value is the estimate
+    // scaled to that speed, so comparing the estimate with it would be
+    // tautological; the measured work is what the estimate is far from.)
+    let median = speed.median_work_min;
+    if estimate <= median.saturating_mul(2) && estimate.saturating_mul(2) >= median {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{task}: estimate {estimate} min; {model} has taken {}x its estimates over {} tasks (median {} min of work): about {calibrated} min",
+        speed.median_ratio, speed.samples, speed.median_work_min
+    )))
+}
+
+/// The eta line of a departing apply (M7.3): the measured speed of the lanes'
+/// models against the voyage's eta, on its slowest lane. `departing` are the
+/// voyages this apply departs; a confirmed apply on a voyage that already
+/// departed uses the current voyage.
+fn speed_eta_line(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &Draft,
+    departing: &BTreeSet<String>,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    let milestone = match departing.iter().next() {
+        Some(milestone) => milestone.clone(),
+        None if draft.confirmed => current_voyage(tx, project)?,
+        None => return Ok(None),
+    };
+    if milestone.is_empty() {
+        return Ok(None);
+    }
+    let Some(voyage) = tx.get_voyage(project, &milestone)? else {
+        return Ok(None);
+    };
+    let Some(eta) = voyage.eta.clone().filter(|eta| !eta.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(config) = project_config(tx, project)? else {
+        return Ok(None);
+    };
+    let speeds = crate::speed::measured(tx, now)?;
+    let mut per_lane: BTreeMap<String, u32> = BTreeMap::new();
+    for task in tx.tasks_of_project(project)? {
+        if task.milestone.as_deref() != Some(milestone.as_str()) || task.state.is_terminal() {
+            continue;
+        }
+        let estimate = task.estimate_min.unwrap_or(0).max(0) as u32;
+        let minutes = match model_of_task(tx, &config, project, &task)? {
+            Some(model) => crate::speed::calibrated(&speeds, &model, estimate).unwrap_or(estimate),
+            None => estimate,
+        };
+        let lane = task.lane.clone().unwrap_or_else(|| "captain".to_string());
+        *per_lane.entry(lane).or_default() += minutes;
+    }
+    let Some(slowest) = per_lane.values().max().copied() else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
+        "eta {eta}; the measured speed of the lanes' models puts the open tasks at about {} on the slowest lane",
+        crate::time::hours(i64::from(slowest) * 60)
+    )))
+}
+
 /// The key the captain's `- merge-first T-<n>` writes (T-574): the task whose
 /// queued merge goes next, on its own. The engine reads it when it orders its
 /// ready merges and clears it when that merge starts.
@@ -4373,6 +4536,191 @@ mod tests {
         let draft = parse(text).unwrap();
         let (env, fp) = cap();
         apply(s, &env, Some(&fp), None, &draft, text, rid, NOW)
+    }
+
+    // ---- M7.3: estimates against the measured speed ---------------------
+
+    const SPEED_CONFIG: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+models = ["m"]
+
+[conventions]
+integration = "dev"
+gate = "true"
+"#;
+
+    /// A project whose lane `heat` runs model `m`, with `attempts` measured
+    /// attempts of it: 15 minutes of work against a 75 minute estimate (ratio
+    /// 0.2).
+    fn speed_world(attempts: usize) -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            let mut project = testing::seed_project(tx, "p", "sess", NOW)?;
+            project.config_toml = SPEED_CONFIG.to_string();
+            tx.update_project(&project)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                NOW,
+            )?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+            for i in 0..attempts {
+                let id = format!("T-{}", 90 + i);
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.clone(),
+                    rank: 100 + i as i64,
+                    state: TaskState::Done,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(75),
+                    issue: None,
+                    updated: NOW,
+                })?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: id.clone(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Accepted,
+                    candidate: Some("c".into()),
+                    report: None,
+                    safe_point: None,
+                    started: NOW - 86_400,
+                    updated: NOW - 86_400,
+                })?;
+                tx.set_attempt_time("p", &id, 1, gear_store::AttemptStep::Started, NOW - 86_400)?;
+                tx.set_attempt_time(
+                    "p",
+                    &id,
+                    1,
+                    gear_store::AttemptStep::HandedIn,
+                    NOW - 86_400 + 15 * 60,
+                )?;
+                tx.set_meta(&crate::tasks::attempt_model_key("p", &id, 1), "m")?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn run_confirmed(s: &mut Store, text: &str, rid: &str) -> GearResult<ApplyResult> {
+        let mut draft = parse(text).unwrap();
+        draft.confirmed = true;
+        draft.decisions.push(
+            "2026-10-27 10:05 confirmed: the voyage departs | why: the user said depart"
+                .to_string(),
+        );
+        let (env, fp) = cap();
+        apply(s, &env, Some(&fp), None, &draft, text, rid, NOW)
+    }
+
+    #[test]
+    fn an_estimate_far_from_the_measured_speed_is_named() {
+        let mut s = speed_world(5);
+        let r = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        assert_eq!(
+            r.warnings[0],
+            "T-1: estimate 60 min; m has taken 0.2x its estimates over 5 tasks (median 15 min of work): about 12 min"
+        );
+    }
+
+    #[test]
+    fn an_estimate_within_the_measured_speed_is_not_named() {
+        let mut s = speed_world(5);
+        let r = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 15\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn under_five_samples_no_estimate_is_named() {
+        let mut s = speed_world(4);
+        let r = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn a_departing_apply_names_the_eta_against_the_measured_speed() {
+        let mut s = speed_world(5);
+        let text = format!(
+            "<!-- gear-plan project=p base=0 -->\n# Milestone M1: the voyage\ndone: it ships\nbar: stable\neta: 8h\ndepart: now\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n"
+        );
+        let r = run_confirmed(&mut s, &text, "r1").unwrap();
+        assert!(
+            r.warnings.iter().any(|warning| warning
+                == "eta 8h; the measured speed of the lanes' models puts the open tasks at about 0h12m on the slowest lane"),
+            "{:?}",
+            r.warnings
+        );
     }
 
     /// T-563: a task on a lane nobody works is named after the apply, one line
