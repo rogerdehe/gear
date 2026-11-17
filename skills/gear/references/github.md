@@ -20,12 +20,18 @@ inherits the root's section: it names another repository):
 [github]
 repo = "owner/name"
 merge = "pr"                   # "push" (default): merge locally and push; "pr": land through the pull request
-merge_method = "squash"        # with "pr": "squash" (default) or "merge"
+merge_method = "squash"        # the pull-request merge method: "squash" (default) or "merge"; push mode reads [conventions].merge_method
 
 [github.issues]
 labels = ["gear"]              # which issues become tasks; empty = every open one
 voyage_label = "{project}/{milestone}"  # the label a departed voyage's issues carry; "" turns it off
 ```
+
+`merge_method` under `[github]` is the method the pull request is merged with
+(`squash` by default: one commit per task, carrying the `Gear-Task`,
+`Gear-Attempt`, `Gear-Candidate` and `Gear-Source` trailers; `merge` keeps a
+merge commit). A project in push mode does not read this key: it reads
+`[conventions].merge_method` instead, which defaults to `squash`.
 
 ## What the engine does, and when
 

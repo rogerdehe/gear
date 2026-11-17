@@ -288,6 +288,9 @@ enum ReportOp {
         #[arg(long)]
         voyage: Option<String>,
     },
+    /// How fast each model works (M7.3): the measured work time and the
+    /// actual/estimate ratio of the attempts it ran, over the last 90 days.
+    Speed,
     /// The captain's coverage report (T-474): the accepted attempts whose
     /// candidate is not on the integration branch — accepted and never landed.
     Coverage,
@@ -667,6 +670,7 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Queue { json }) => cmd_queue(json),
         Some(Cmd::Report { op }) => match op {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
+            ReportOp::Speed => cmd_report_speed(cli.json),
             ReportOp::Coverage => cmd_report_coverage(cli.json),
             ReportOp::Voyage { voyage, all } => cmd_report_voyage(voyage, all, cli.json),
         },
@@ -1649,12 +1653,31 @@ fn ensure_integration_branch(parsed: &gear_app::config::ProjectConfig) {
         let integration = format!("refs/remotes/{remote}/{}", repo.integration);
         let release = format!("refs/remotes/{remote}/{}", repo.release);
         let fetched = run(&["fetch", "-q", &remote, &repo.release, &repo.integration]);
+        // M7.3: an integration branch whose content is already on the release
+        // branch (a squash landed it) starts from the release head too, though
+        // its own sha is no ancestor of it.
+        let squashed = repo.integration != repo.release
+            && gear_app::base::adds_nothing(
+                std::path::Path::new(&repo.path),
+                &release,
+                &integration,
+            )
+            .unwrap_or(false);
         let behind = fetched
-            && run(&["merge-base", "--is-ancestor", &integration, &release])
-            && !run(&["merge-base", "--is-ancestor", &release, &integration]);
+            && (squashed
+                || (run(&["merge-base", "--is-ancestor", &integration, &release])
+                    && !run(&["merge-base", "--is-ancestor", &release, &integration])));
         if behind {
             let target = format!("{release}:refs/heads/{}", repo.integration);
-            if run(&["push", "-q", &remote, &target]) {
+            // A squash is no fast-forward: the branch is reset to the release
+            // head, so the push is forced. The branch was just fetched, and
+            // only a branch with nothing of its own gets here.
+            let pushed = if squashed {
+                run(&["push", "-q", "--force", &remote, &target])
+            } else {
+                run(&["push", "-q", &remote, &target])
+            };
+            if pushed {
                 eprintln!(
                     "integration branch: {remote}/{} moved forward to {remote}/{}",
                     repo.integration, repo.release
@@ -2833,6 +2856,59 @@ fn run_report_time(
         return serde_json::to_string(&report).map_err(json_error);
     }
     Ok(gear_app::time::render(&report))
+}
+
+/// `gear report speed`: how fast each model works (M7.3). One row per model
+/// measured from the store's attempts of the last 90 days: the samples, the
+/// median work time and the median actual/estimate ratio.
+///
+/// Read-only, so it starts no engine.
+fn cmd_report_speed(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_report_speed(&mut store, &env, &mut herdr, json, now_ts())?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear report speed` body, over injected state.
+fn run_report_speed(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    json: bool,
+    now: i64,
+) -> GearResult<String> {
+    observe_identity(store, env, herdr)?;
+    let speeds = store.read(|tx| gear_app::speed::measured(tx, now))?;
+    if json {
+        let rows: Vec<serde_json::Value> = speeds
+            .iter()
+            .map(|speed| {
+                serde_json::json!({
+                    "model": speed.model,
+                    "samples": speed.samples,
+                    "median_work_min": speed.median_work_min,
+                    "median_ratio": speed.median_ratio,
+                })
+            })
+            .collect();
+        let report = serde_json::json!({"period_days": 90, "models": rows});
+        return serde_json::to_string(&report).map_err(json_error);
+    }
+    if speeds.is_empty() {
+        return Ok("nothing is measured yet".to_string());
+    }
+    let mut out = String::from("Model speed · last 90 days");
+    for speed in &speeds {
+        out.push_str(&format!(
+            "\n{} · {} samples · median {}m of work · ratio {:.2}x",
+            speed.model, speed.samples, speed.median_work_min, speed.median_ratio
+        ));
+    }
+    Ok(out)
 }
 
 fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
@@ -7281,6 +7357,110 @@ path="api"
         assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
     }
 
+    /// M7.3: `gear report speed` prints one row per measured model with its
+    /// samples, median work time and ratio; `--json` gives the same fields;
+    /// an empty store says nothing is measured yet.
+    #[test]
+    fn report_speed_prints_a_row_per_model_and_says_when_nothing_is_measured() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                for (id, estimate, work, model) in [
+                    ("T-1", 100, 14, "model-a"),
+                    ("T-2", 100, 15, "model-a"),
+                    ("T-3", 100, 16, "model-a"),
+                    ("T-4", 50, 10, "model-b"),
+                ] {
+                    tx.insert_task(&TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: id.into(),
+                        rank: 1,
+                        state: gear_model::TaskState::Done,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: Some("M2".into()),
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: Some(estimate),
+                        issue: None,
+                        updated: T0,
+                    })?;
+                    tx.insert_attempt(&gear_store::AttemptRow {
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                        project: "p".into(),
+                        task: id.into(),
+                        n: 1,
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: gear_model::AttemptState::Accepted,
+                        candidate: Some("abc".into()),
+                        report: None,
+                        safe_point: None,
+                        started: T0,
+                        updated: T0,
+                    })?;
+                    tx.set_attempt_time("p", id, 1, gear_store::AttemptStep::Started, T0)?;
+                    tx.set_attempt_time(
+                        "p",
+                        id,
+                        1,
+                        gear_store::AttemptStep::HandedIn,
+                        T0 + work * 60,
+                    )?;
+                    tx.set_meta(&format!("attempt.model:p:{id}:1"), model)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let out =
+            run_report_speed(&mut store, &env("captain", CAP_PANE), &mut herdr, false, T0).unwrap();
+        assert!(out.contains("last 90 days"), "{out}");
+        assert!(
+            out.contains("model-a · 3 samples · median 15m of work · ratio 0.15x"),
+            "{out}"
+        );
+        assert!(
+            out.contains("model-b · 1 samples · median 10m of work · ratio 0.20x"),
+            "{out}"
+        );
+
+        let json =
+            run_report_speed(&mut store, &env("captain", CAP_PANE), &mut herdr, true, T0).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["period_days"], 90);
+        let models = value["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["model"], "model-a");
+        assert_eq!(models[0]["samples"], 3);
+        assert_eq!(models[0]["median_work_min"], 15);
+        assert_eq!(models[0]["median_ratio"], 0.15);
+        assert_eq!(models[1]["model"], "model-b");
+        assert_eq!(models[1]["samples"], 1);
+        assert_eq!(models[1]["median_work_min"], 10);
+        assert_eq!(models[1]["median_ratio"], 0.2);
+
+        let (mut empty, mut herdr) = world();
+        let out =
+            run_report_speed(&mut empty, &env("captain", CAP_PANE), &mut herdr, false, T0).unwrap();
+        assert_eq!(out, "nothing is measured yet");
+    }
+
     /// T-474: `gear report coverage` lists the accepted attempts whose
     /// candidate is not on the integration branch; the production git check
     /// answers from a real repository.
@@ -10253,11 +10433,78 @@ path="api"
 
         sh(
             &work,
-            "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m own && \
+            "echo own > own.txt && git add own.txt && \
+             git -c user.name=t -c user.email=t@t commit -q -m own && \
              git push -q origin HEAD:refs/heads/p/dev && \
              git checkout -q -b rel origin/main && \
              git -c user.name=t -c user.email=t@t commit -q --allow-empty -m three && \
              git push -q origin HEAD:refs/heads/main",
+        );
+        let own = tip("p/dev");
+        ensure_integration_branch(&parsed);
+        assert_eq!(tip("p/dev"), own, "work of its own: left as it is");
+    }
+
+    /// M7.3: an integration branch squashed onto the release branch starts
+    /// from the release head at departure; one with work of its own stays.
+    #[test]
+    fn an_integration_branch_squashed_onto_release_moves_forward_at_departure() {
+        let root = tempfile::tempdir().unwrap();
+        let sh = |dir: &std::path::Path, command: &str| {
+            let out = std::process::Command::new("sh")
+                .args(["-c", command])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{command}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git clone -q {} {}", origin.display(), work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one && \
+             git push -q origin HEAD:refs/heads/main HEAD:refs/heads/p/dev && \
+             git checkout -q -b p/dev && echo work > work.txt && git add work.txt && \
+             git -c user.name=t -c user.email=t@t commit -q -m work && \
+             git push -q origin p/dev && git checkout -q main && \
+             git merge -q --squash p/dev && \
+             git -c user.name=t -c user.email=t@t commit -q -m 'the work' && \
+             git push -q origin main",
+        );
+        let text = format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"{}\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[[lanes]]\nname = \"hull\"\nduty = \"everything\"\nowns = [\"src/\"]\nkind = \"pi\"\nprofile = \"pi\"\n\n[conventions]\nintegration = \"p/dev\"\ngate = \"true\"\n",
+            work.display()
+        );
+        let parsed = gear_app::config::parse(&text).unwrap();
+        let tip = |branch: &str| {
+            sh(
+                &work,
+                &format!("git ls-remote origin refs/heads/{branch} | cut -f1"),
+            )
+        };
+        ensure_integration_branch(&parsed);
+        assert_eq!(
+            tip("p/dev"),
+            tip("main"),
+            "squashed onto release: moved forward to the release head"
+        );
+
+        // Work of its own on the integration branch: left as it is.
+        sh(
+            &work,
+            "git checkout -q p/dev && git reset -q --hard origin/p/dev && \
+             echo own > own.txt && git add own.txt && \
+             git -c user.name=t -c user.email=t@t commit -q -m own && \
+             git push -q origin p/dev",
         );
         let own = tip("p/dev");
         ensure_integration_branch(&parsed);

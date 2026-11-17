@@ -43,9 +43,12 @@ The branch names, the remote and the voyage folder are configuration: a project 
 | `seat_branch` | `{project}/{seat}/{voyage}` | `{project}`, `{seat}`, `{voyage}` (`between-voyages` when no voyage is under way) |
 | `remote` | `origin` | — (the git remote a hand-in is checked against) |
 | `voyage_dir` | `gear/voyages/{milestone}` | `{project}`, `{milestone}`; its `plan.md`, `reports/` and `reviews/` |
+| `merge_method` | `squash` | — (`squash`: one commit per task, a feature replays its tasks' commits; `merge`: merge commits) |
 | `merge_message` | `merge({task}): {source}` | `{project}`, `{task}`, `{source}` |
 | `review_message` | `review({task}): {what}` | `{project}`, `{task}`, `{attempt}`, `{what}` |
 | `plan_message` | `{milestone}: {what}` | `{project}`, `{milestone}`, `{what}` |
+
+A task's merge lands as one commit on the integration tip by default (`merge_method = "squash"`): subject `T-n: <goal>`, the lane's commit subjects in the body, and the trailers `Gear-Task`, `Gear-Attempt`, `Gear-Candidate` and one `Gear-Source` per merged commit. A feature's integration task replays its members' commits onto the integration tip, one commit per member, each carrying `Gear-Task`; a replay that conflicts falls back to one squashed commit. With `merge_method = "merge"` the engine keeps merge commits, as before. The trailers are how GEAR finds a landed commit whose own sha is no ancestor of the branch (a squash): the lost-merge scan, the coverage report, the plan's merged check and the branch sweep read them.
 
 ## 4. Worktrees — always through Herdr
 
