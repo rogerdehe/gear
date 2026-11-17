@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1309 -->
+<!-- gear-plan project=gear base=1318 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -9,7 +9,13 @@ eta: 5h
 depart: now
 
 # Decisions
-- 2026-11-17 note: T-708's merge gate failed on gear-engine's upgrade_contract.rs, a home page assertion outside mast's files; a carrier task on T-708's candidate fixes it and T-708 is carried by it | why: M-9044/M-9045; the packet named only home and board tests, not every crate that asserts the page
+- station M-9105: keep course | why: 180m in, only T-694's rework left and in review; projected 226m from departure, inside the 5h eta
+- station M-9093: keep course | why: 21 done at 157m, T-693 passed, only T-694 left on hull; projected 203m from departure
+- 2026-11-17 note: T-694 no longer waits for T-693's merge: it starts on hull/t693's tip while T-693 is in review, and merges dev before its hand-in | why: M-9088 the voyage stopped with hull idle behind a review
+- station M-9085: keep course | why: 150m in, 2 left, both hull's and serial (T-694 replays through T-693's squash path); projected 262m from departure, inside the 5h eta
+- station M-9072: keep course | why: 18 done at 132m, pace 0.27x, projected 153m from departure; hull on T-693's rework then T-694, mast's last reviews pending
+- 2026-11-17 note: hull on T-696 for 90 min without a push (M-9046): it is debugging its lost-scan test, not stuck; told to push WIP now and ask with the test's facts if it still fails in 20 min | why: the quiet item asks the captain to look and act
+- 2026-11-17 note: T-708's merge gate failed on gear-engine's upgrade_contract.rs, a home page assertion outside mast's files; T-708 goes back to mast as a rework with that file (T-712, a carrier, was opened and cancelled: GEAR settles a failed merge by a remerge or a rework) | why: M-9044/M-9045; the packet named only home and board tests, not every crate that asserts the page
 - station M-9036: keep course | why: 15 done at 112m, pace 0.25x, projected 133m from departure; hull on T-696 then T-693 rework and T-694, mast on its backlog tasks
 - station M-9009: keep course | why: 12 done at 97m, pace 0.25x, projected 118m from departure; both lanes busy
 - 2026-11-17 note: T-696's packet named a review.rs `on_integration` that does not exist (it is plan.rs's, done in T-697); the item is dropped from T-696. The CLI and skill go back to mast with T-700, T-704 and T-705, since mast ran dry and hull still holds T-693's rework and T-694 | why: M-8988 hull looped 55 min on the wrong name; M-8987 mast idle
@@ -51,10 +57,10 @@ estimate: 60
 deps: T-691
 
 ## T-694 [must] lane=hull milestone=M7.3 required
-goal: A feature lands by replaying its commits. In crates/gear-engine/src/merge.rs `prepare_merge`, for a feature's integration task (`op.payload["keep_branch"] == true`) in squash mode: instead of the merge loop, from `base_ref` cherry-pick each commit of `git rev-list --reverse --first-parent --no-merges <base_ref>..<task_tip>` in order (`git cherry-pick --allow-empty --keep-redundant-commits`); then amend the last commit's message to append `Gear-Source: <task_tip>` and `Gear-Candidate: <sha>`. When a cherry-pick fails: `git cherry-pick --abort`, `git reset --hard <base_ref>`, and land the feature as one squashed commit through the task squash path (body line `- replay conflicted; squashed`). The feature's own commits keep their messages and trailers.
+goal: A feature lands by replaying its commits. Start your branch from hull/t693's tip 6c9980134538321d6102d0802bb2ae151a546099 (T-693's squash, in review): `git switch -c <your task branch> 6c9980134538321d6102d0802bb2ae151a546099`; once T-693 is on origin/dev, merge origin/dev into your branch before you hand in. In crates/gear-engine/src/merge.rs `prepare_merge`, for a feature's integration task (`op.payload["keep_branch"] == true`) in squash mode: instead of the merge loop, from `base_ref` cherry-pick each commit of `git rev-list --reverse --first-parent --no-merges <base_ref>..<task_tip>` in order (`git cherry-pick --allow-empty --keep-redundant-commits`); then amend the last commit's message to append `Gear-Source: <task_tip>` and `Gear-Candidate: <sha>`. When a cherry-pick fails: `git cherry-pick --abort`, `git reset --hard <base_ref>`, and land the feature as one squashed commit through the task squash path (body line `- replay conflicted; squashed`). The feature's own commits keep their messages and trailers.
 accept: tests: a feature branch holding two squashed member commits and one merge of dev into it lands as those two commits on dev, in order, no merge commit, the last one with the two extra trailers; a feature whose replay conflicts lands as one squashed commit; the gate still runs once on the result.
 estimate: 60
-deps: T-693
+deps: -
 
 ## T-695 [must] lane=hull milestone=M7.3 required
 goal: Members are found by trailer (write the key as the literal `Gear-Task`; T-691 adds the constant in parallel, no wait for it). In crates/gear-engine/src/merge.rs: `bisect_members` also takes a non-merge commit as a member when its message carries `Gear-Task: <task>` (read the log with `--format=%H%x09%P%x09%s%x09%(trailers:key=Gear-Task,valueonly,separator=%x2C)`; the member's name is the trailer's task); `run_bisect`'s probe stays a merge of the k-th member onto the base (on a linear feature branch that brings members 1..k). In `prepare_merge`'s `members_in` (the feature integration task's members), a first-parent commit with a `Gear-Task` trailer is a member too, its own commit (not `^2`) left out of the foreign-commit check.
@@ -139,7 +145,7 @@ deps: -
 goal: The captain's home page says the voyage's done sentence once. On `gear` (no arguments) the done text is printed three times: the board voyage block (crates/gear-board/src/voyage.rs, the line `Voyage {} {} · done: {}{waits}`), the goal line (crates/gear-board/src/stations.rs, `Your goal, voyage {milestone}: done: ...`, which stays as it is) and the snapshot's voyage line (crates/gear-app/src/home.rs line ~736, `crate::plan::voyage_line(voyage)`). Make voyage.rs's line `Voyage {} {}{waits}` (no done text), and in home.rs print a short line instead of `voyage_line`: `Voyage <milestone> <title> · eta <eta> · bar <first word of the bar>`. `plan::voyage_line` and its other callers (time.rs, plan.rs) do not change.
 accept: a home test: the captain's page carries the done sentence exactly once (in the goal line); the board's own voyage view still shows the voyage name and its clock; existing home and board tests pass with their expected texts updated.
 estimate: 15
-carried-by: T-712
+carried-by: -
 deps: -
 
 ## T-709 [should] lane=mast milestone=M7.3
@@ -164,5 +170,6 @@ deps: -
 goal: Carry T-708 onto dev: its merge gate failed on crates/gear-engine/tests/it/upgrade_contract.rs (line ~71 asserts the home page contains `Voyage M5 the next voyage · done: it sails`, the line T-708 shortened). Start your branch from T-708's candidate 61fb9235f2faab7729a34404c459f63068e32d07 (`git switch -c <your task branch> 61fb9235f2faab7729a34404c459f63068e32d07`), change that assertion to the short line T-708's home page now prints for that voyage (`Voyage M5 the next voyage` with its eta and bar as home.rs writes them) and check the done sentence still appears once through the goal line, then grep crates/ for any other test asserting `· done: ` on the home page and fix it the same way.
 accept: `make check CRATE=gear-engine TESTS='test(upgrade)'` passes; `make check CRATE=gear-app` passes; the diff touches only test files.
 estimate: 10
+state: cancelled
 deps: -
 
