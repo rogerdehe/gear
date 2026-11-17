@@ -429,12 +429,12 @@ fn take_outside_the_checkout_finds_the_only_project_and_refuses_an_unknown_name(
     assert!(error.detail.contains("Projects: p"), "{}", error.detail);
 }
 
-/// T-552: a pane may hold the captain seats of more than one project (T-485).
-/// Taking the second project's seat keeps the name the agent already carries:
-/// renaming it after the second project takes the first captain's name away,
-/// and every prompt to that captain then fails with `agent_not_found`.
+/// A pane may hold the captain seats of more than one project (T-485). A take
+/// names the agent after the project it took: a captain that takes over
+/// another fleet carries that fleet's name, never the one it came from, and
+/// the pane records the take so the engine's name pass keeps it.
 #[test]
-fn take_keeps_the_captain_name_a_pane_already_holds() {
+fn take_names_the_pane_after_the_fleet_it_took() {
     let root = tempfile::tempdir().unwrap();
     let mut s = world(root.path());
     add_project("q", root.path(), CAP_PANE, &mut s);
@@ -458,19 +458,18 @@ fn take_keeps_the_captain_name_a_pane_already_holds() {
         taken.generation, 1,
         "the seat the pane already holds is kept"
     );
-    assert_eq!(
-        taken.named,
-        gear_herdr::Ensured::Kept,
-        "the name is reported as kept"
-    );
+    assert_eq!(taken.named, gear_herdr::Ensured::Renamed);
     assert_eq!(
         herdr.agent_name(CAP_PANE),
-        Some("p-captain"),
-        "the first captain keeps its name"
+        Some("q-captain"),
+        "the agent carries the name of the fleet it took"
     );
-    assert!(
-        herdr.renames_to("q-captain").is_empty(),
-        "no rename was attempted"
+    assert_eq!(
+        s.read(|tx| tx.get_meta(&gear_app::captain::pane_named_key(CAP_PANE)))
+            .unwrap()
+            .as_deref(),
+        Some("q:captain"),
+        "the pane records the take"
     );
     // Both captain seats are bound to the pane, and p's is untouched.
     for seat in ["p:captain", "q:captain"] {

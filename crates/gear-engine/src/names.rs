@@ -19,8 +19,8 @@
 //! across the tasks it reviews (T-482).
 
 use gear_herdr::{HerdrAct, Outcome};
+use gear_model::SeatRole;
 use gear_model::{GearResult, MsgKind, MsgState, Ts};
-use gear_model::{SeatRole, TaskState};
 use gear_store::{BindingStatus, NewMessage, SeatRow, Store, Tx};
 use std::collections::BTreeMap;
 
@@ -254,57 +254,52 @@ fn seats_on_pane(tx: &Tx<'_>, pane: &str) -> GearResult<Vec<(SeatRow, Ts)>> {
     Ok(seats)
 }
 
-/// Whether `project` has an open voyage (T-570): one that has departed and
-/// whose work is not all settled — the board's "sailing" voyage, the project
-/// the user is working on.
-fn has_open_voyage(tx: &Tx<'_>, project: &str) -> GearResult<bool> {
-    let tasks = tx.tasks_of_project(project)?;
-    for voyage in tx.voyages_of_project(project)? {
-        if voyage.departure.is_none() {
-            continue;
-        }
-        let open = tasks.iter().any(|task| {
-            task.milestone.as_deref() == Some(voyage.milestone.as_str())
-                && !matches!(
-                    task.state,
-                    TaskState::Done | TaskState::Failed | TaskState::Cancelled
-                )
-        });
-        if open {
-            return Ok(true);
+/// The meta key that names the captain seat a pane took last: written by
+/// `gear captain take` and by a handover (gear_app::captain), read here.
+pub use gear_app::captain::pane_named_key;
+
+/// When `seat` came to `pane` (its current run of generations on that pane):
+/// a rebind of the same pane (a new session, a restart) is not an arrival, so
+/// the earliest binding of the run counts, not the newest.
+fn arrived_on_pane(tx: &Tx<'_>, seat: &SeatRow, pane: &str, newest: Ts) -> GearResult<Ts> {
+    let mut arrived = newest;
+    let mut generation = seat.generation;
+    while generation > 1 {
+        generation -= 1;
+        match tx.get_binding(&seat.id, generation)? {
+            Some(binding) if binding.pane_id == pane => arrived = arrived.min(binding.created),
+            Some(_) => break,
+            None => continue,
         }
     }
-    Ok(false)
+    Ok(arrived)
 }
 
-/// The name an unnamed agent on `pane` gets (T-570): the name of a seat whose
-/// project has an open voyage first — that is the project being worked on —
-/// and, of the seats that tie, the one bound first (the older rule of T-485).
-fn primary_name(store: &mut Store, on_pane: &[(SeatRow, Ts)]) -> GearResult<String> {
-    let mut best: Option<(&SeatRow, Ts, bool)> = None;
-    for (seat, at) in on_pane {
-        let open = store.read(|tx| has_open_voyage(tx, &seat.project))?;
-        let better = match &best {
-            None => true,
-            Some((current, current_at, current_open)) => {
-                (open, std::cmp::Reverse(*at), seat.id.as_str())
-                    > (
-                        *current_open,
-                        std::cmp::Reverse(*current_at),
-                        current.id.as_str(),
-                    )
+/// The name the agent on `pane` carries: the name of the captain seat the pane
+/// took last. A captain that takes over another fleet carries that fleet's
+/// name from then on, never the name of the fleet it came from (user,
+/// 2026-11-17; T-552 and T-570 kept whichever name the agent had, so every
+/// takeover went on showing the old fleet). The seat named by the last take
+/// wins; without one (a take before this rule, a released seat), the seat that
+/// came to the pane last, then the seat id.
+fn primary_name(store: &mut Store, pane: &str, on_pane: &[(SeatRow, Ts)]) -> GearResult<String> {
+    store.read(|tx| {
+        if let Some(taken) = tx.get_meta(&pane_named_key(pane))? {
+            if let Some((seat, _)) = on_pane.iter().find(|(seat, _)| seat.id == taken) {
+                return Ok(desired(seat));
             }
-        };
-        if better {
-            best = Some((seat, *at, open));
         }
-    }
-    Ok(best.map(|(seat, _, _)| desired(seat)).unwrap_or_else(|| {
-        on_pane
-            .first()
-            .map(|(seat, _)| desired(seat))
-            .unwrap_or_default()
-    }))
+        let mut best: Option<(Ts, &SeatRow)> = None;
+        for (seat, created) in on_pane {
+            let arrived = arrived_on_pane(tx, seat, pane, *created)?;
+            if best
+                .is_none_or(|(at, current)| (arrived, seat.id.as_str()) > (at, current.id.as_str()))
+            {
+                best = Some((arrived, seat));
+            }
+        }
+        Ok(best.map(|(_, seat)| desired(seat)).unwrap_or_default())
+    })
 }
 
 /// [`ensure`] for a pane that holds the seats of one or several projects
@@ -391,16 +386,13 @@ pub fn restore(
             continue;
         }
         // A pane may hold the seats of several projects (T-485, T-570): its one
-        // agent carries one name, and every seat bound to that pane accepts it.
-        // Naming it after each seat in turn flipped the Prometheus captain
-        // between `prometheus-captain` and `lawrence-captain` every pass, and
-        // every prompt by the other name failed. Where the pass has to choose —
-        // the agent has no name — the seat whose project has an open voyage
-        // goes first, and the seat bound first after it.
+        // agent carries one name, the name of the captain seat the pane took
+        // last ([`primary_name`]). Every pass of every project picks the same
+        // one, so the name never flips; a delivery to the other seat goes to
+        // the pane's live name ([`resolve_target`]).
         let on_pane = store.read(|tx| seats_on_pane(tx, &binding.pane_id))?;
-        let keep: Vec<String> = on_pane.iter().map(|(seat, _)| desired(seat)).collect();
-        let name = primary_name(store, &on_pane)?;
-        match gear_herdr::ensure_agent_name_keeping(herdr, &names, &binding.pane_id, &name, &keep) {
+        let name = primary_name(store, &binding.pane_id, &on_pane)?;
+        match gear_herdr::ensure_agent_name_keeping(herdr, &names, &binding.pane_id, &name, &[]) {
             Ensure::Named => {
                 if let Some(open) = open_taken(store, project, &seat.id)? {
                     store.write(|tx| resolve_taken(tx, project, &open, now))?;
@@ -421,10 +413,6 @@ pub fn restore(
                     .write(|tx| report_taken(tx, project, &seat, &name, holder.as_deref(), now))?;
             }
             Ensure::NoAgent => {}
-            // T-570's keep-set is `Named`, not `Kept`; `Kept` stays the
-            // `captain take` on a pane that already holds another project's
-            // captain seat (T-552), and the engine has nothing to do about it.
-            Ensure::Kept => {}
             Ensure::Failed(reason) => {
                 restored.failed.push(format!("{}: {reason}", seat.id));
             }
@@ -523,169 +511,118 @@ mod tests {
     const NOW: Ts = 1_800_000_000;
     const PANE: &str = "w2:p10";
 
-    /// Two projects, each with its captain seat bound to the same pane — the
-    /// incident: one agent carries two seats.
-    fn two_captains() -> Store {
+    /// Two captain seats on one pane: `first` came at NOW, `second` an hour
+    /// later (the captain of `first` took over `second`'s fleet).
+    fn took_over(first: &str, second: &str) -> Store {
         let mut store = Store::open_in_memory().unwrap();
         store
             .write(|tx| {
-                testing::seed_project(tx, "prometheus", "sess", NOW)?;
-                testing::seed_project(tx, "lawrence", "sess", NOW)?;
-                testing::seed_active_seat(
-                    tx,
-                    "prometheus",
-                    "captain",
-                    SeatRole::Captain,
-                    PANE,
-                    "claude",
-                    NOW,
-                )?;
-                testing::seed_active_seat(
-                    tx,
-                    "lawrence",
-                    "captain",
-                    SeatRole::Captain,
-                    PANE,
-                    "claude",
-                    NOW,
-                )?;
+                for (project, at) in [(first, NOW), (second, NOW + 3600)] {
+                    testing::seed_project(tx, project, "sess", NOW)?;
+                    testing::seed_active_seat(
+                        tx,
+                        project,
+                        "captain",
+                        SeatRole::Captain,
+                        PANE,
+                        "claude",
+                        at,
+                    )?;
+                }
                 Ok(())
             })
             .unwrap();
         store
     }
 
-    /// A departed voyage of `project`, with one task still running (T-570's
-    /// "open voyage").
-    fn open_voyage(store: &mut Store, project: &str) {
-        store
-            .write(|tx| {
-                tx.upsert_voyage(&gear_store::VoyageRow {
-                    project: project.to_string(),
-                    milestone: "M1".to_string(),
-                    title: "a voyage".to_string(),
-                    done: None,
-                    bar: None,
-                    eta: None,
-                    departure: Some(NOW),
-                    departure_tasks: Some(1),
-                    departure_estimate_min: Some(30),
-                    updated: NOW,
-                })?;
-                tx.insert_task(&gear_store::TaskRow {
-                    repo: None,
-                    base: None,
-                    gate: None,
-                    rework_estimate_min: None,
-                    project: project.to_string(),
-                    id: "T-1".to_string(),
-                    rank: 1,
-                    state: TaskState::Running,
-                    priority: "must".to_string(),
-                    lane: Some("heat".to_string()),
-                    milestone: Some("M1".to_string()),
-                    required: false,
-                    contract_version: 1,
-                    deps: Vec::new(),
-                    followup_of: None,
-                    wait_on: None,
-                    wait_cond: None,
-                    rework_note: None,
-                    estimate_min: Some(30),
-                    issue: None,
-                    updated: NOW,
-                })
-            })
-            .unwrap();
+    fn name_of(herdr: &mut FakeHerdr) -> Option<String> {
+        read(herdr).unwrap().get(PANE).cloned().flatten()
     }
 
-    /// T-570: a pane that holds two seats keeps the name the agent carries,
-    /// pass after pass, and a delivery to either seat still finds it.
+    /// A captain that took over another fleet carries that fleet's name from
+    /// the next pass, and keeps it pass after pass; a delivery to either seat
+    /// still reaches the agent by the name it carries.
     #[test]
-    fn a_pane_with_two_seats_keeps_one_agent_name() {
-        let mut store = two_captains();
+    fn a_captain_that_took_over_another_fleet_carries_its_name() {
+        let mut store = took_over("prometheus", "lawrence");
         let mut herdr = FakeHerdr::new();
-        // The user named the agent after its own project (prometheus-captain);
-        // the engine's restore must not set it back to lawrence-captain.
         herdr.add_agent_named(PANE, "claude", AgentStatus::Idle, "prometheus-captain");
 
         for pass in 0..3 {
-            let names = read(&mut herdr).unwrap();
-            let restored =
-                restore(&mut store, &mut herdr, "prometheus", &names, NOW + pass).unwrap();
-            assert!(restored.renamed.is_empty(), "pass {pass}: {restored:?}");
-            let restored = restore(&mut store, &mut herdr, "lawrence", &names, NOW + pass).unwrap();
-            assert!(restored.renamed.is_empty(), "pass {pass}: {restored:?}");
-            assert_eq!(
-                read(&mut herdr)
-                    .unwrap()
-                    .get(PANE)
-                    .cloned()
-                    .flatten()
-                    .as_deref(),
-                Some("prometheus-captain"),
-                "pass {pass}: the name stayed"
-            );
+            for project in ["prometheus", "lawrence"] {
+                let names = read(&mut herdr).unwrap();
+                restore(&mut store, &mut herdr, project, &names, NOW + pass).unwrap();
+                assert_eq!(
+                    name_of(&mut herdr).as_deref(),
+                    Some("lawrence-captain"),
+                    "pass {pass}, {project}"
+                );
+            }
         }
+        assert_eq!(
+            herdr.renames_to("lawrence-captain"),
+            vec![PANE],
+            "renamed once"
+        );
+        assert!(
+            herdr.renames_to("prometheus-captain").is_empty(),
+            "never back"
+        );
 
-        // A delivery to either seat finds the agent by the name it carries.
         let names = read(&mut herdr).unwrap();
-        for seat in ["prometheus:captain", "lawrence:captain"] {
-            let wanted = format!("{}-captain", seat.split(':').next().unwrap_or_default());
-            let target = resolve_target(&mut herdr, &names, PANE, &wanted, "claude");
+        for wanted in ["prometheus-captain", "lawrence-captain"] {
             assert_eq!(
-                target,
+                resolve_target(&mut herdr, &names, PANE, wanted, "claude"),
                 Target::Prompt {
-                    name: "prometheus-captain".to_string()
+                    name: "lawrence-captain".to_string()
                 },
-                "{seat}"
-            );
-            // And the naming before a delivery keeps the name: it is a seat's.
-            assert_eq!(
-                ensure_for(&mut store, &mut herdr, PANE, &wanted),
-                Ensure::Named,
-                "{seat}"
+                "{wanted}"
             );
             assert_eq!(
-                read(&mut herdr)
-                    .unwrap()
-                    .get(PANE)
-                    .cloned()
-                    .flatten()
-                    .as_deref(),
-                Some("prometheus-captain"),
-                "{seat}: the name stayed"
+                ensure_for(&mut store, &mut herdr, PANE, wanted),
+                Ensure::Named
             );
         }
     }
 
-    /// T-570: an unnamed agent on a pane with two seats gets the name of the
-    /// seat whose project has an open voyage — that is the project being worked
-    /// on.
+    /// A rebind of the same pane (a new session) is not an arrival: the fleet
+    /// taken over keeps the name though the first seat's binding is newer.
     #[test]
-    fn an_unnamed_agent_gets_the_open_voyages_seat_name() {
-        let mut store = two_captains();
-        open_voyage(&mut store, "lawrence");
+    fn a_rebind_on_the_same_pane_does_not_take_the_name_back() {
+        let mut store = took_over("prometheus", "lawrence");
+        store
+            .write(|tx| {
+                let seat = tx.get_seat("prometheus:captain")?.unwrap();
+                let mut binding = tx.get_binding(&seat.id, seat.generation)?.unwrap();
+                binding.generation = seat.generation + 1;
+                binding.created = NOW + 7200;
+                tx.insert_binding(&binding)?;
+                tx.set_seat_generation(&seat.id, seat.generation + 1)
+            })
+            .unwrap();
         let mut herdr = FakeHerdr::new();
         herdr.add_agent(PANE, "claude", AgentStatus::Idle);
 
         let names = read(&mut herdr).unwrap();
-        let restored = restore(&mut store, &mut herdr, "prometheus", &names, NOW).unwrap();
+        restore(&mut store, &mut herdr, "prometheus", &names, NOW).unwrap();
 
-        assert_eq!(restored.renamed, vec!["prometheus:captain".to_string()]);
-        assert_eq!(
-            read(&mut herdr)
-                .unwrap()
-                .get(PANE)
-                .cloned()
-                .flatten()
-                .as_deref(),
-            Some("lawrence-captain"),
-            "the open voyage's project names the pane"
-        );
-        // A second pass keeps it: both seats accept the name.
+        assert_eq!(name_of(&mut herdr).as_deref(), Some("lawrence-captain"));
+    }
+
+    /// The seat named by the last `captain take` wins over arrival order: the
+    /// captain took back the first fleet.
+    #[test]
+    fn the_last_take_names_the_pane() {
+        let mut store = took_over("prometheus", "lawrence");
+        store
+            .write(|tx| tx.set_meta(&pane_named_key(PANE), "prometheus:captain"))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(PANE, "claude", AgentStatus::Idle, "lawrence-captain");
+
         let names = read(&mut herdr).unwrap();
-        let restored = restore(&mut store, &mut herdr, "lawrence", &names, NOW + 1).unwrap();
-        assert!(restored.renamed.is_empty(), "{restored:?}");
+        restore(&mut store, &mut herdr, "lawrence", &names, NOW).unwrap();
+
+        assert_eq!(name_of(&mut herdr).as_deref(), Some("prometheus-captain"));
     }
 }

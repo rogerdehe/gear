@@ -1093,12 +1093,8 @@ fn onboard_seat(
                 Some(live) => Some(live),
                 None => match crate::names::ensure_for(store, herdr, &pane, &name) {
                     crate::names::Ensure::Renamed | crate::names::Ensure::Named => Some(name),
-                    // `Kept` is a `captain take` outcome (T-552): the engine's
-                    // naming keeps a pane's other seat's name as `Named`
-                    // (T-570).
                     crate::names::Ensure::Taken { .. }
                     | crate::names::Ensure::NoAgent
-                    | crate::names::Ensure::Kept
                     | crate::names::Ensure::Failed(_) => None,
                 },
             };
