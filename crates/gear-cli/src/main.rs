@@ -1649,12 +1649,31 @@ fn ensure_integration_branch(parsed: &gear_app::config::ProjectConfig) {
         let integration = format!("refs/remotes/{remote}/{}", repo.integration);
         let release = format!("refs/remotes/{remote}/{}", repo.release);
         let fetched = run(&["fetch", "-q", &remote, &repo.release, &repo.integration]);
+        // M7.3: an integration branch whose content is already on the release
+        // branch (a squash landed it) starts from the release head too, though
+        // its own sha is no ancestor of it.
+        let squashed = repo.integration != repo.release
+            && gear_app::base::adds_nothing(
+                std::path::Path::new(&repo.path),
+                &release,
+                &integration,
+            )
+            .unwrap_or(false);
         let behind = fetched
-            && run(&["merge-base", "--is-ancestor", &integration, &release])
-            && !run(&["merge-base", "--is-ancestor", &release, &integration]);
+            && (squashed
+                || (run(&["merge-base", "--is-ancestor", &integration, &release])
+                    && !run(&["merge-base", "--is-ancestor", &release, &integration])));
         if behind {
             let target = format!("{release}:refs/heads/{}", repo.integration);
-            if run(&["push", "-q", &remote, &target]) {
+            // A squash is no fast-forward: the branch is reset to the release
+            // head, so the push is forced. The branch was just fetched, and
+            // only a branch with nothing of its own gets here.
+            let pushed = if squashed {
+                run(&["push", "-q", "--force", &remote, &target])
+            } else {
+                run(&["push", "-q", &remote, &target])
+            };
+            if pushed {
                 eprintln!(
                     "integration branch: {remote}/{} moved forward to {remote}/{}",
                     repo.integration, repo.release
@@ -10252,11 +10271,78 @@ path="api"
 
         sh(
             &work,
-            "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m own && \
+            "echo own > own.txt && git add own.txt && \
+             git -c user.name=t -c user.email=t@t commit -q -m own && \
              git push -q origin HEAD:refs/heads/p/dev && \
              git checkout -q -b rel origin/main && \
              git -c user.name=t -c user.email=t@t commit -q --allow-empty -m three && \
              git push -q origin HEAD:refs/heads/main",
+        );
+        let own = tip("p/dev");
+        ensure_integration_branch(&parsed);
+        assert_eq!(tip("p/dev"), own, "work of its own: left as it is");
+    }
+
+    /// M7.3: an integration branch squashed onto the release branch starts
+    /// from the release head at departure; one with work of its own stays.
+    #[test]
+    fn an_integration_branch_squashed_onto_release_moves_forward_at_departure() {
+        let root = tempfile::tempdir().unwrap();
+        let sh = |dir: &std::path::Path, command: &str| {
+            let out = std::process::Command::new("sh")
+                .args(["-c", command])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{command}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(
+            root.path(),
+            &format!("git init -q --bare {}", origin.display()),
+        );
+        sh(
+            root.path(),
+            &format!("git clone -q {} {}", origin.display(), work.display()),
+        );
+        sh(
+            &work,
+            "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one && \
+             git push -q origin HEAD:refs/heads/main HEAD:refs/heads/p/dev && \
+             git checkout -q -b p/dev && echo work > work.txt && git add work.txt && \
+             git -c user.name=t -c user.email=t@t commit -q -m work && \
+             git push -q origin p/dev && git checkout -q main && \
+             git merge -q --squash p/dev && \
+             git -c user.name=t -c user.email=t@t commit -q -m 'the work' && \
+             git push -q origin main",
+        );
+        let text = format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"{}\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[[lanes]]\nname = \"hull\"\nduty = \"everything\"\nowns = [\"src/\"]\nkind = \"pi\"\nprofile = \"pi\"\n\n[conventions]\nintegration = \"p/dev\"\ngate = \"true\"\n",
+            work.display()
+        );
+        let parsed = gear_app::config::parse(&text).unwrap();
+        let tip = |branch: &str| {
+            sh(
+                &work,
+                &format!("git ls-remote origin refs/heads/{branch} | cut -f1"),
+            )
+        };
+        ensure_integration_branch(&parsed);
+        assert_eq!(
+            tip("p/dev"),
+            tip("main"),
+            "squashed onto release: moved forward to the release head"
+        );
+
+        // Work of its own on the integration branch: left as it is.
+        sh(
+            &work,
+            "git checkout -q p/dev && git reset -q --hard origin/p/dev && \
+             echo own > own.txt && git add own.txt && \
+             git -c user.name=t -c user.email=t@t commit -q -m own && \
+             git push -q origin p/dev",
         );
         let own = tip("p/dev");
         ensure_integration_branch(&parsed);
