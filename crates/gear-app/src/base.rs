@@ -53,6 +53,144 @@ pub fn may_delete_branch(branch: &str) -> bool {
     name.contains('/') && !name.starts_with('/') && !name.ends_with('/')
 }
 
+/// Whether `branch` is one GEAR made for `project` by itself, so the reclaim
+/// may delete it: a name expanded from one of the project's own branch
+/// templates (`[conventions]` task, review, direction, feature and seat
+/// branches), never a project's integration, release or staging branch, and
+/// never a top-level name ([`may_delete_branch`]).
+///
+/// The namespace alone (`<project>/...`) proves nothing: MissHerAI's own
+/// integration branch `selina/dev`, with open pull requests on it, was deleted
+/// by M1's reclaim because the registered config named `dev` (2026-11-17), as
+/// the shared `dev` had been before (2026-11-12). A branch GEAR did not make
+/// is people's work and stays.
+pub fn gear_made_branch(
+    config: &crate::config::ProjectConfig,
+    project: &str,
+    branch: &str,
+) -> bool {
+    let name = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    if !may_delete_branch(name) {
+        return false;
+    }
+    let conventions = &config.conventions;
+    let protected = config
+        .repos()
+        .into_iter()
+        .any(|repo| repo.integration == name || repo.release == name)
+        || [
+            conventions.integration.as_str(),
+            conventions.release.as_str(),
+            conventions.staging.as_str(),
+        ]
+        .contains(&name);
+    if protected {
+        return false;
+    }
+    let task_like = [
+        conventions.task_branch.as_str(),
+        conventions.review_branch.as_str(),
+        conventions.direction_branch.as_str(),
+    ];
+    task_like
+        .iter()
+        .any(|template| matches_template(template, config, project, name, true))
+        || matches_template(&conventions.feature_branch, config, project, name, false)
+        || matches_template(&conventions.seat_branch, config, project, name, false)
+}
+
+/// Whether `name` is `template` expanded for `project`. Each placeholder
+/// takes only what GEAR fills in: `{project}` the project, `{lane}` one of the
+/// config's lanes, `{seat}` a lane, `captain`, `merge` or `review-<k>`, `{n}`
+/// digits, `{task}` `t-<digits>`, `{feature}` `f-<digits>`, `{voyage}` a
+/// milestone (`M<digit>...`) or `between-voyages`. Anything else is not GEAR's
+/// (`selina/docs/flow` is not a seat branch). A task's branch may carry a
+/// rework suffix (`t53-v2`) when `suffix` is set.
+fn matches_template(
+    template: &str,
+    config: &crate::config::ProjectConfig,
+    project: &str,
+    name: &str,
+    suffix: bool,
+) -> bool {
+    #[derive(Clone, Copy)]
+    enum Part<'a> {
+        Literal(&'a str),
+        Var(&'a str),
+    }
+    let mut parts = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        if open > 0 {
+            parts.push(Part::Literal(&rest[..open]));
+        }
+        match &rest[open + 1..open + close] {
+            "project" => parts.push(Part::Literal(project)),
+            var @ ("n" | "task" | "feature" | "lane" | "seat" | "voyage") => {
+                parts.push(Part::Var(var))
+            }
+            _ => return false,
+        }
+        rest = &rest[open + close + 1..];
+    }
+    if !rest.is_empty() {
+        parts.push(Part::Literal(rest));
+    }
+    let lanes: Vec<&str> = config.lanes.iter().map(|lane| lane.name.as_str()).collect();
+    let digits = |text: &str| !text.is_empty() && text.chars().all(|c| c.is_ascii_digit());
+    let fits = |var: &str, value: &str| match var {
+        "n" => digits(value),
+        "task" => value.strip_prefix("t-").is_some_and(digits),
+        "feature" => value.strip_prefix("f-").is_some_and(digits),
+        "lane" => lanes.contains(&value),
+        "seat" => {
+            lanes.contains(&value)
+                || value == "captain"
+                || value == "merge"
+                || value.strip_prefix("review-").is_some_and(digits)
+        }
+        "voyage" => {
+            value == gear_model::branch::BETWEEN_VOYAGES
+                || (value.starts_with('M')
+                    && value[1..].starts_with(|c: char| c.is_ascii_digit())
+                    && !value.contains('/'))
+        }
+        _ => false,
+    };
+    fn walk(
+        parts: &[Part<'_>],
+        name: &str,
+        suffix: bool,
+        fits: &dyn Fn(&str, &str) -> bool,
+    ) -> bool {
+        let Some((first, more)) = parts.split_first() else {
+            return name.is_empty()
+                || (suffix
+                    && name.strip_prefix('-').is_some_and(|tail| {
+                        !tail.is_empty()
+                            && tail.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    }));
+        };
+        match *first {
+            Part::Literal(text) => name
+                .strip_prefix(text)
+                .is_some_and(|rest| walk(more, rest, suffix, fits)),
+            Part::Var(var) => {
+                let segment = name.find('/').unwrap_or(name.len());
+                (1..=segment).any(|len| {
+                    name.is_char_boundary(len)
+                        && fits(var, &name[..len])
+                        && walk(more, &name[len..], suffix, fits)
+                })
+            }
+        }
+    }
+    walk(&parts, name, suffix, &fits)
+}
+
 pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
     let ctx = env.ctx.as_ref().ok_or_else(|| {
         GearError::new(
@@ -786,7 +924,82 @@ mod tests {
 
 #[cfg(test)]
 mod may_delete_tests {
-    use super::may_delete_branch;
+    use super::{gear_made_branch, may_delete_branch};
+
+    fn config(integration: &str) -> crate::config::ProjectConfig {
+        crate::config::parse(&format!(
+            r#"[project]
+id = "selina"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "hull"
+duty = "everything"
+owns = ["src/"]
+kind = "codex"
+profile = "codex"
+
+[conventions]
+integration = "{integration}"
+gate = "make test"
+"#
+        ))
+        .unwrap()
+    }
+
+    /// MissHerAI 2026-11-17: the registered config named `dev`, and the
+    /// reclaim deleted the project's real integration branch `selina/dev`.
+    /// Only a branch made from one of GEAR's templates may be deleted.
+    #[test]
+    fn only_a_branch_gear_made_is_deletable() {
+        let config = config("dev");
+        for kept in [
+            "selina/dev",
+            "selina/main",
+            "selina/release-1",
+            "selina/docs/flow",
+            "dev",
+            "main",
+            "staging",
+            "other/hull/M1",
+            "selina/docs/M1",
+            "selina/hull/notes",
+            "deck/t12",
+        ] {
+            assert!(!gear_made_branch(&config, "selina", kept), "{kept}");
+        }
+        for made in [
+            "hull/t12",
+            "hull/t12-v2",
+            "review/t12",
+            "selina/direction/t-12",
+            "selina/feature/f-3",
+            "selina/hull/M1",
+            "selina/captain/between-voyages",
+            "selina/merge/M1",
+            "selina/review-4/M7.3",
+        ] {
+            assert!(gear_made_branch(&config, "selina", made), "{made}");
+        }
+    }
+
+    /// The configured integration branch is never deletable, even when it
+    /// matches a template.
+    #[test]
+    fn the_integration_branch_is_never_deletable() {
+        let config = config("selina/dev/M1");
+        assert!(!gear_made_branch(&config, "selina", "selina/dev/M1"));
+    }
 
     #[test]
     fn a_shared_top_level_branch_is_never_deletable() {

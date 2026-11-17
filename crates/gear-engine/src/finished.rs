@@ -420,9 +420,7 @@ pub fn reclaim(
                 ));
                 continue;
             }
-            if let Err(reason) =
-                delete_remote_branch(&repo.path, &config.conventions.remote, &branch)
-            {
+            if let Err(reason) = delete_remote_branch(&repo.path, &config, project, &branch) {
                 left.push(format!("branch {branch} ({reason})"));
             }
             handled.insert(branch);
@@ -444,9 +442,16 @@ pub fn reclaim(
             if handled.contains(&branch.name) || upcoming(&branch.name) {
                 continue;
             }
+            // A branch GEAR did not make from its own templates is people's
+            // work (an integration branch, a release line, a docs branch): it
+            // is neither deleted nor named for deletion (MissHerAI
+            // 2026-11-17: `selina/dev` was deleted with its open PRs).
+            if !gear_app::base::gear_made_branch(&config, project, &branch.name) {
+                continue;
+            }
             if branch_on_integration(&repo.path, &config, &repo.integration, &branch.tip) {
                 if let Err(reason) =
-                    delete_remote_branch(&repo.path, &config.conventions.remote, &branch.name)
+                    delete_remote_branch(&repo.path, &config, project, &branch.name)
                 {
                     left.push(format!("branch {} ({reason})", branch.name));
                 }
@@ -454,34 +459,9 @@ pub fn reclaim(
                 left.push(format!("branch {} (extra commits)", branch.name));
             }
         }
-        // T-622: the integration branch lives for one voyage. It is deleted
-        // only when its tip is on the release branch (everything it holds is
-        // released); otherwise it stays, and is never named: the release is
-        // the user's decision, often behind a human review, and GEAR never
-        // asks a captain to merge into it or to delete it (M-708, M-719). A
-        // deletion the remote refuses (a protected branch) is not named
-        // either. An integration branch equal to the release branch is never
-        // deleted. Only a branch in the project's own namespace
-        // (`<project>/dev`) is the voyage's: a shared name such as `dev` is
-        // the integration branch of other projects and of the release flow
-        // too, and is never deleted (SelyraAI 2026-11-12: prometheus M5's
-        // landing deleted the shared `dev`).
-        if repo.integration != repo.release
-            && repo.integration != config.conventions.staging
-            && repo.integration.starts_with(&format!("{project}/"))
-        {
-            if remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
-                .is_some()
-            {
-                if branch_on_release(&repo.path, &config, &repo.release, &repo.integration) {
-                    let _ = delete_remote_branch(
-                        &repo.path,
-                        &config.conventions.remote,
-                        &repo.integration,
-                    );
-                }
-            }
-        }
+        // The integration branch is never deleted, whatever its name: it holds
+        // the project's open pull requests and people's work, and a departure
+        // reuses it (MissHerAI 2026-11-17, SelyraAI 2026-11-12).
     }
     // T-618: close each Herdr workspace of the project whose panes hold no
     // agent; name the others.
@@ -858,7 +838,7 @@ fn records_step(
     };
     if ahead == 0 {
         // Nothing new: only the branch goes.
-        delete_records_branch(&dir, &remote, branch);
+        delete_records_branch(&dir, config, project, branch);
         return Ok(Recorded::Empty);
     }
     // T-699: the records branch carries the voyage's records and nothing else.
@@ -955,17 +935,18 @@ fn records_step(
         let _ = git(&["reset", "--hard", &base]);
         return Ok(Recorded::Failed(error));
     }
-    delete_records_branch(&dir, &remote, branch);
+    delete_records_branch(&dir, config, project, branch);
     Ok(Recorded::Merged)
 }
 
 /// Delete a branch on the remote and locally: a landed voyage keeps no captain
 /// branch. A ref git refuses (the captain's own worktree still holds it) stays
 /// and the reclaim item names it.
-fn delete_records_branch(dir: &Path, remote: &str, branch: &str) {
-    if !gear_app::base::may_delete_branch(branch) {
+fn delete_records_branch(dir: &Path, config: &ProjectConfig, project: &str, branch: &str) {
+    if !gear_app::base::gear_made_branch(config, project, branch) {
         return;
     }
+    let remote = config.conventions.remote.as_str();
     let _ = merge::git(dir, &["push", remote, "--delete", branch]);
     let _ = merge::git(dir, &["branch", "-D", branch]);
     let _ = merge::git(
@@ -1177,26 +1158,20 @@ fn remote_branch_tip(repo: &str, remote: &str, branch: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether the integration branch adds nothing to the release branch (T-622,
-/// M7.3): it is an ancestor of it, or its content is already there — a squash
-/// landed the same tree.
-fn branch_on_release(repo: &str, config: &ProjectConfig, release: &str, integration: &str) -> bool {
-    let remote = &config.conventions.remote;
-    gear_app::base::adds_nothing(
-        Path::new(repo),
-        &format!("{remote}/{release}"),
-        &format!("{remote}/{integration}"),
-    )
-    .unwrap_or(false)
-}
-
-/// Delete a branch on the remote.
-fn delete_remote_branch(repo: &str, remote: &str, branch: &str) -> Result<(), String> {
-    if !gear_app::base::may_delete_branch(branch) {
+/// Delete a branch on the remote: only one GEAR made from its own templates
+/// ([`gear_app::base::gear_made_branch`]).
+fn delete_remote_branch(
+    repo: &str,
+    config: &ProjectConfig,
+    project: &str,
+    branch: &str,
+) -> Result<(), String> {
+    if !gear_app::base::gear_made_branch(config, project, branch) {
         return Err(format!(
-            "{branch} is a shared branch: GEAR never deletes it"
+            "{branch} is not a branch GEAR made: GEAR never deletes it"
         ));
     }
+    let remote = config.conventions.remote.as_str();
     merge::git(Path::new(repo), &["push", remote, "--delete", branch])?;
     Ok(())
 }
@@ -1368,6 +1343,9 @@ profile = "pi"
 [conventions]
 integration = "dev"
 gate = "true"
+# The fixture's task branches sit under the project (`p/hull/t9`): only a
+# branch made from a template is the reclaim's to delete.
+task_branch = "{{project}}/{{lane}}/t{{n}}"
 # The fixture names its own voyage folder and keeps today's merge commits;
 # the squash is tested on its own.
 voyage_dir = "voyages/{{milestone}}"
@@ -2422,8 +2400,7 @@ merge_method = "merge"
     /// branch (everything it holds is released), and kept when it holds
     /// unreleased work.
     #[test]
-    fn the_reclaim_deletes_an_integration_branch_on_release_and_never_names_one_with_unreleased_work(
-    ) {
+    fn the_reclaim_never_deletes_or_names_an_integration_branch() {
         // A shared integration branch (`dev`, other projects' too) is never
         // deleted, even when everything on it is on main.
         let mut landed = Landed::new("shared-integration");
@@ -2435,7 +2412,9 @@ merge_method = "merge"
             "a shared integration branch is kept: {branches}"
         );
 
-        // The project's own `p/dev`, everything on main: the branch goes.
+        // The project's own `p/dev`, everything on main: it stays too — an
+        // integration branch carries open pull requests and people's work
+        // (MissHerAI 2026-11-17: `selina/dev` was deleted with its PRs).
         let mut landed = Landed::new("integration-on-release");
         sh(
             &landed.work,
@@ -2454,8 +2433,8 @@ merge_method = "merge"
         landed.reclaim(NOW + 600);
         let branches = landed.origin_branches();
         assert!(
-            !branches.lines().any(|branch| branch == "p/dev"),
-            "the project's own integration branch on release is deleted: {branches}"
+            branches.lines().any(|branch| branch == "p/dev"),
+            "the project's own integration branch is kept: {branches}"
         );
 
         // A commit on dev that main does not have: the branch holds
@@ -2482,6 +2461,36 @@ merge_method = "merge"
                 .all(|item| !item.body.contains("branch dev")),
             "the integration branch is never named"
         );
+    }
+
+    /// MissHerAI 2026-11-17: the registered config named `dev` while the
+    /// project worked on `selina/dev`, and the reclaim deleted `selina/dev`
+    /// with its open pull requests. A branch under the project that no GEAR
+    /// template made is people's: neither deleted nor named.
+    #[test]
+    fn a_project_branch_gear_did_not_make_is_kept_and_not_named() {
+        let mut landed = Landed::new("people-branch");
+        sh(
+            &landed.work,
+            "git push -q origin dev:refs/heads/p/dev dev:refs/heads/p/docs/flow",
+        );
+
+        landed.reclaim(NOW + 600);
+
+        let branches = landed.origin_branches();
+        for kept in ["p/dev", "p/docs/flow"] {
+            assert!(
+                branches.lines().any(|branch| branch == kept),
+                "{kept}: {branches}"
+            );
+            assert!(
+                landed
+                    .items(RECLAIM_THREAD)
+                    .iter()
+                    .all(|item| !item.body.contains(&format!("branch {kept}"))),
+                "{kept} is not named"
+            );
+        }
     }
 
     /// M7.3: a leftover task branch whose work was squashed onto the
@@ -2516,10 +2525,10 @@ merge_method = "merge"
         );
     }
 
-    /// M7.3: an integration branch squashed onto the release branch by a pull
-    /// request adds nothing to it, so the reclaim deletes it like one merged.
+    /// An integration branch squashed onto the release branch by a pull
+    /// request is kept: the reclaim never deletes an integration branch.
     #[test]
-    fn an_integration_branch_squashed_onto_release_is_deleted() {
+    fn an_integration_branch_squashed_onto_release_is_kept() {
         let mut landed = Landed::new("squashed-integration");
         sh(
             &landed.work,
@@ -2538,8 +2547,8 @@ merge_method = "merge"
 
         let branches = landed.origin_branches();
         assert!(
-            !branches.lines().any(|branch| branch == "p/dev"),
-            "the integration branch whose content is on main is deleted: {branches}"
+            branches.lines().any(|branch| branch == "p/dev"),
+            "the integration branch is kept: {branches}"
         );
     }
 
@@ -2670,10 +2679,10 @@ merge_method = "merge"
         let mut landed = Landed::new("cancelled");
         sh(
             &landed.work,
-            "git checkout -q -b hull/t10 dev && echo extra > extra.txt && git add extra.txt && \
-             git commit -q -m extra && git push -q origin hull/t10 && git checkout -q dev",
+            "git checkout -q -b p/hull/t10 dev && echo extra > extra.txt && git add extra.txt && \
+             git commit -q -m extra && git push -q origin p/hull/t10 && git checkout -q dev",
         );
-        let sha = sh(&landed.work, "git rev-parse hull/t10")
+        let sha = sh(&landed.work, "git rev-parse p/hull/t10")
             .trim()
             .to_string();
         landed
@@ -2693,13 +2702,16 @@ merge_method = "merge"
 
         let branches = landed.origin_branches();
         assert!(
-            !branches.contains("hull/t10"),
+            !branches.contains("p/hull/t10"),
             "the cancelled task's branch is deleted: {branches}"
         );
         let items = landed.items("landing:M1");
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0].state, MsgState::Resolved);
-        assert_eq!(items[0].body, format!("T-10 cancelled: hull/t10 at {sha}"));
+        assert_eq!(
+            items[0].body,
+            format!("T-10 cancelled: p/hull/t10 at {sha}")
+        );
         assert!(
             landed
                 .items(RECLAIM_THREAD)

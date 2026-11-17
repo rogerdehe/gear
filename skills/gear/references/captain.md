@@ -36,7 +36,7 @@ You are the captain of a GEAR project (or of several, from the same pane): the b
    Start nothing before the sheet is confirmed. These are the only questions of the voyage you ask on your own; the next one is when the voyage lands.
 4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1/plan.md`, then register the project yourself, from the repository: `GEAR_ADMIN=1 gear admin init gear/gear.toml` (the confirmed departure sheet is the user's consent).
 
-   Before departure the repository has a Makefile (or the stack's equivalent) with one target per cost, and the gate is one of them: `check` — what a lane or reviewer runs: one package or crate, given as an argument it refuses to run without, with its build jobs and test threads capped (2 and 2 on a shared machine); `gate` — the merge gate the engine runs once per merge: the whole build and suite, still capped; `full` — uncapped, run by you alone for a release. Lanes and reviewers never build or test the whole repository themselves.
+   Before departure the project names two commands in the tool it already uses (npm scripts, a Makefile, a shell script, its test runner — never a new tool for GEAR's sake): a **check** — what a lane or reviewer runs on what it changed: one package or module, capped on a shared machine; and the **gate** in `[conventions].gate` — the merge gate the engine runs once per merge: the whole build and suite. Write both into the project's agent instructions (its AGENTS.md or equivalent). Lanes and reviewers never build or test the whole repository themselves.
 
    **Keep their checks light.** A packet is 15–30 minutes of work; a check that takes 5–10 of them is a fifth to a third of the round spent proving, not building, and it is the most common reason lanes are slow. A lane or reviewer checks what the task changed; the whole suite runs once, at merge, where it judges the code as it will land (a hand-in check cannot: the integration branch moves before the merge). Never put the merge gate or a whole-suite run into an `accept`, a rework note or a verdict to feel safe. A project whose own rule is a full run on every hand-in keeps its rule; it is theirs to choose, and you weigh its cost in the estimates.
 
@@ -52,7 +52,7 @@ You are the captain of a GEAR project (or of several, from the same pane): the b
    name = "api"                # [a-z][a-z0-9-]*, unique
    path = "services/api"       # relative to project.repo
    integration = "dev"         # optional; defaults to [conventions]
-   gate = "make test"          # optional; defaults to [conventions]
+   gate = "npm test"           # optional; defaults to [conventions]
 
    [quota]
    lanes = 2                   # the lanes this project has, not those running at once
@@ -95,7 +95,7 @@ You are the captain of a GEAR project (or of several, from the same pane): the b
    [conventions]
    integration = "dev"
    release = "main"
-   gate = "make test"          # the project's own build+test, run before every merge (no default: name it)
+   gate = "npm test"           # the project's own build+test, run before every merge (no default: name it)
    ```
 
    ```bash

@@ -139,7 +139,7 @@ The engine sweeps the remote every 10 minutes. A cancelled task's branches are d
 
 `[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`, local to the reviewer's worktree) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}/{voyage}`, project / seat / voyage, as a task is project / lane / task) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>` and `prometheus/web/M6.2` sits beside the lane's task branches `prometheus/web/t675` instead of above them, one branch per voyage (`between-voyages` when no voyage is under way). Re-apply the config after changing it: GEAR renames the branch of each seat's worktree that still stands on the old name (`git branch -m`, and on the remote when it was pushed), and names a seat whose worktree is on another branch instead of touching it.
 
-The gate has no default: GEAR cannot know another project's build and test, so a project that names none is refused at `gear admin init` until it does (`make gate`, `go test ./...`, `npm test` — whatever exits non-zero on any failure and runs in seconds).
+The gate has no default: GEAR cannot know another project's build and test, so a project that names none is refused at `gear admin init` until it does (`npm test`, `go test ./...`, `cargo test`, `make test` — whatever the project already runs,  exits non-zero on any failure and runs in seconds).
 
 A repo may also carry a `[github]` mode (issues in, pull requests out); what the engine writes there and when: `gear --skill github`.
 

@@ -50,7 +50,7 @@ it before trusting it:
   not a strict one.
 
 If there is no gate, build a trusted one first (one command, offline, seconds).
-`make test` or `scripts/check.sh` is enough; the captain writes the command into
+The project's own test command (`npm test`, `pytest`, `scripts/check.sh`) is enough; the captain writes the command into
 `[conventions].gate`.
 
 ## 4. Keep, replace or drop
