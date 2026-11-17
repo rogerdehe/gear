@@ -18,6 +18,49 @@ pub(crate) fn waiting_seat(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
     Ok(false)
 }
 
+/// Whether the seat handed in another task after `declared` and has no other
+/// task in flight now: a lane that went on with other work during a wait and
+/// has run out of it.
+fn lane_idle_after_other_work(
+    tx: &Tx<'_>,
+    project: &str,
+    seat: &str,
+    waiting: &str,
+    declared: Ts,
+) -> GearResult<bool> {
+    let busy = tx.open_attempts_of_seat(seat)?.iter().any(|attempt| {
+        attempt.task != waiting
+            && matches!(
+                attempt.state,
+                AttemptState::Delivered
+                    | AttemptState::Started
+                    | AttemptState::Stopped
+                    | AttemptState::Unknown
+            )
+    });
+    if busy {
+        return Ok(false);
+    }
+    for task in tx.tasks_of_project(project)? {
+        if task.id == waiting {
+            continue;
+        }
+        for attempt in tx.attempts_of_task(project, &task.id)? {
+            if attempt.seat != seat {
+                continue;
+            }
+            if tx
+                .attempt_times(project, &task.id, attempt.n)?
+                .handed_in
+                .is_some_and(|at| at > declared)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Reconcile declared waits and their seat pause rows.
 fn reconcile(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     for task in tx.tasks_of_project(project)? {
@@ -88,6 +131,44 @@ fn reconcile(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
                 .iter()
                 .any(|m| m.task.as_deref() == Some(task.id.as_str()) && m.kind != MsgKind::Blocked);
             let expired = until.is_some_and(|at| now >= at);
+            // The lane worked other tasks during the wait and has nothing in
+            // flight now: it would sit idle until the wait runs out, while
+            // what it waited for may have come long ago (MissHerAI T-30,
+            // 2026-11-17: it waited on a merge that landed before the wait
+            // was declared, handed in T-35, then sat idle for over an hour).
+            // The wait ends and the lane is sent back to the task.
+            let idle = !answered
+                && !expired
+                && lane_idle_after_other_work(tx, project, &attempt.seat, &task.id, declared)?;
+            if idle {
+                // What the lane said it waited for: its last blocked message
+                // on the task.
+                let reason = tx
+                    .messages_from_since(project, &attempt.seat, 0)?
+                    .into_iter()
+                    .filter(|m| {
+                        m.task.as_deref() == Some(task.id.as_str()) && m.kind == MsgKind::Blocked
+                    })
+                    .max_by_key(|m| m.created)
+                    .map(|m| {
+                        format!(
+                            "you waited for: {}",
+                            m.body.chars().take(200).collect::<String>()
+                        )
+                    })
+                    .unwrap_or_else(|| "it waited on something outside GEAR".to_string());
+                tx.clear_task_wait(project, &task.id)?;
+                tx.close_pause(project, &attempt.seat, "wait", now)?;
+                tx.set_meta(&key, "")?;
+                tx.insert_message(&NewMessage {
+                    project: project.into(), thread: format!("wait-external-idle:{}:{}", task.id, attempt.n),
+                    task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0,
+                    recipient: attempt.seat.clone(), kind: MsgKind::Instruction, urgent: true,
+                    body: format!("GEAR: you have no other work in flight, so your external wait on {} is over ({reason}). Check whether it still holds: if what you waited for is there, continue {}; if not, declare the wait again with what is still missing.", task.id, task.id),
+                    reply_to: None, needs_ack: false, state: MsgState::Open, created: now, meta: None,
+                })?;
+                continue;
+            }
             if answered || expired {
                 tx.clear_task_wait(project, &task.id)?;
                 tx.close_pause(project, &attempt.seat, "wait", now)?;
