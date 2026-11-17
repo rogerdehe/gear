@@ -23,6 +23,10 @@ pub struct ApplyResult {
     pub version: i64,
     /// Ids assigned to `## NEW` blocks, in draft order.
     pub created: Vec<String>,
+    /// The `NEW:<label>` labels of this draft and the ids they got, in draft
+    /// order (M7.3): the file rewrite turns each label into its id.
+    #[serde(default)]
+    pub labels: Vec<(String, String)>,
     /// Existing tasks whose contract got a new version: (id, new version).
     pub contract_changed: Vec<(String, i64)>,
     /// Non-terminal tasks the draft did not mention (kept, ranked after the listed ones).
@@ -416,6 +420,14 @@ fn apply_queue(
         .cloned()
         .chain(new_ids.values().cloned())
         .collect();
+    // M7.3: the labels of the draft's NEW blocks, so a block may depend on
+    // another by name instead of guessing its id.
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+    for (index, item) in draft.queue.iter().enumerate() {
+        if let (Some(label), Some(id)) = (&item.label, new_ids.get(&index)) {
+            labels.insert(label.clone(), id.clone());
+        }
+    }
 
     // What the cancellations of this apply did (T-112).
     let mut cancelled: Vec<String> = Vec::new();
@@ -644,7 +656,24 @@ fn apply_queue(
                 ));
             }
         }
+        // M7.3: `deps: NEW:<label>` names a block of this draft; it becomes
+        // that block's id before the dep is checked.
+        let mut deps: Vec<String> = Vec::new();
         for dep in &item.deps {
+            match dep.strip_prefix("NEW:") {
+                Some(label) => match labels.get(label) {
+                    Some(id) => deps.push(id.clone()),
+                    None => {
+                        return Err(bad(
+                            item.line,
+                            format!("dep NEW:{label} names no block of this draft"),
+                        ));
+                    }
+                },
+                None => deps.push(dep.clone()),
+            }
+        }
+        for dep in &deps {
             if !known.contains(dep) {
                 return Err(bad(
                     item.line,
@@ -771,7 +800,7 @@ fn apply_queue(
                 ));
             }
         }
-        graph.insert(id, item.deps.clone());
+        graph.insert(id, deps.clone());
     }
     // (2) A task outside a feature never waits for one of its members (T-587):
     // a member's work reaches the integration branch only when the feature's
@@ -2056,6 +2085,7 @@ fn apply_queue(
         version,
         warnings,
         created,
+        labels: labels.into_iter().collect(),
         contract_changed,
         not_mentioned,
         settled,
@@ -4657,6 +4687,69 @@ gate = "true"
         );
         let (env, fp) = cap();
         apply(s, &env, Some(&fp), None, &draft, text, rid, NOW)
+    }
+
+    #[test]
+    fn a_new_block_may_depend_on_another_by_label() {
+        let mut s = world();
+        let text = draft_text(
+            0,
+            "## NEW:core [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: NEW:core\n",
+        );
+        let r = run(&mut s, &text, "r1").unwrap();
+        assert_eq!(r.created.len(), 2, "{:?}", r.created);
+        assert_eq!(
+            r.labels,
+            vec![("core".to_string(), r.created[0].clone())],
+            "{:?}",
+            r.labels
+        );
+        let second = s
+            .read(|tx| tx.get_task("p", &r.created[1]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.deps, vec![r.created[0].clone()]);
+        let rewritten = crate::draft::rewrite_applied(
+            &text,
+            r.version,
+            &r.created,
+            &[],
+            &r.labels,
+            &r.milestone_blocks,
+        );
+        assert!(
+            rewritten.contains(&format!("## {} [must] lane=heat", r.created[0])),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains(&format!("## {} [must] lane=heat", r.created[1])),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains(&format!("deps: {}", r.created[0])),
+            "{rewritten}"
+        );
+        assert!(!rewritten.contains("NEW"), "{rewritten}");
+    }
+
+    #[test]
+    fn a_dep_on_an_unknown_label_is_refused() {
+        let mut s = world();
+        let err = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: NEW:core\n",
+            ),
+            "r1",
+        )
+        .unwrap_err();
+        assert!(
+            err.detail
+                .contains("dep NEW:core names no block of this draft"),
+            "{}",
+            err.detail
+        );
     }
 
     #[test]
