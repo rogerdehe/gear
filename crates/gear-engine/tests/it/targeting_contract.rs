@@ -129,6 +129,24 @@ fn a_prompt_to_an_unnamed_live_agent_renames_it_and_retries_next_tick() {
     );
 }
 
+/// A seat whose binding was made moments ago is still starting its agent (a
+/// restart opens the binding and types the command in one tick): a delivery
+/// to its shell waits instead of failing as agent-gone (MissHerAI T-26,
+/// 2026-11-17: the failure rang a false "lane is stuck").
+#[test]
+fn a_delivery_to_a_seat_whose_agent_is_starting_waits() {
+    let mut store = world();
+    let id = intended_delivery(&mut store);
+    let mut herdr = FakeHerdr::new();
+    herdr.add_shell(LANE_PANE);
+
+    execute_intended(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+    let (state, reason) = op_state(&mut store, &id);
+    assert_eq!(state, OpState::Intended, "{reason:?}");
+    assert!(herdr.prompt_targets().is_empty(), "nothing typed");
+}
+
 /// T-149: a prompt to a pane with only a shell fails as agent-gone and types
 /// nothing.
 #[test]
@@ -139,7 +157,7 @@ fn a_prompt_to_a_pane_with_only_a_shell_fails_as_agent_gone() {
     // The agent is gone: the pane is a shell again.
     herdr.add_shell(LANE_PANE);
 
-    let done = execute_intended(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+    let done = execute_intended(&mut store, &mut herdr, "p", T0 + 120).unwrap();
 
     assert_eq!(done, vec![(id.clone(), "failed".to_string())]);
     let (state, reason) = op_state(&mut store, &id);
@@ -162,11 +180,11 @@ fn a_prompt_to_a_pane_with_only_a_shell_fails_as_agent_gone() {
         .filter(|line| line.starts_with("probe deliver T-1 "))
         .collect();
     assert!(
-        log.contains(&"probe deliver T-1 failed 10000 total=10000".to_string()),
+        log.contains(&"probe deliver T-1 failed 120000 total=120000".to_string()),
         "the failed delivery is logged: {log:?}"
     );
     assert!(
-        log.contains(&"probe deliver T-1 done 10000 total=10000".to_string()),
+        log.contains(&"probe deliver T-1 done 120000 total=120000".to_string()),
         "the failed delivery has its completion line: {log:?}"
     );
 }
@@ -180,7 +198,7 @@ fn a_prompt_to_a_pane_with_a_foreign_agent_fails_as_agent_gone() {
     // Another CLI took the pane.
     herdr.add_agent_named(LANE_PANE, "codex", AgentStatus::Idle, "other-agent");
 
-    let done = execute_intended(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+    let done = execute_intended(&mut store, &mut herdr, "p", T0 + 120).unwrap();
 
     assert_eq!(done, vec![(id.clone(), "failed".to_string())]);
     let reason = op_state(&mut store, &id).1.unwrap_or_default();
