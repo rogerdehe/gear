@@ -125,6 +125,11 @@ pub fn update(
             signature: reading.signature,
         })
     });
+    // A CLI with neither a limit log nor a footer bar (codex) shows its spent
+    // limit as a line on the screen: the profile's quota markers, read on the
+    // idle screen the observation already holds (selina, 2026-11-17: a codex
+    // captain at "You've hit your usage limit" kept getting doorbells).
+    let reading = reading.or_else(|| screen_reading(obs, now));
     let Some(reading) = reading else {
         store.write(|tx| tx.set_meta(&counter, "0"))?;
         return Ok(());
@@ -212,6 +217,67 @@ fn log_reading(profile: &Profile, session: Option<&str>, now: Ts) -> Option<Read
     })
 }
 
+/// The spent limit the captain's screen shows: a line that matched one of the
+/// profile's quota markers on the screen the observation read. Its reset is
+/// the clock after "try again at" on that line, when there is one.
+fn screen_reading(obs: &SeatObs, now: Ts) -> Option<Reading> {
+    if !obs.flags.contains(&gear_herdr::ScreenFlag::Quota) {
+        return None;
+    }
+    let screen = obs.screen.as_deref()?;
+    let line = screen
+        .lines()
+        .rev()
+        .find(|line| line.to_ascii_lowercase().contains("limit"))
+        .or_else(|| screen.lines().rev().find(|line| !line.trim().is_empty()))?
+        .trim()
+        .to_string();
+    let reset = line
+        .to_ascii_lowercase()
+        .find("try again at ")
+        .map(|at| {
+            line[at + "try again at ".len()..]
+                .trim_end_matches('.')
+                .trim()
+                .to_string()
+        })
+        .and_then(|hint| reset_time(&hint, now));
+    Some(Reading {
+        exhausted: true,
+        resets: vec![reset],
+        signature: format!("screen {line}"),
+    })
+}
+
+/// A 12-hour clock hint (`11:36 PM`, `9:05am`) as the 24-hour `HH:MM` that
+/// [`reset_time`] reads; any other text is returned as it is.
+fn clock_24h(hint: &str) -> String {
+    let lower = hint.trim().to_ascii_lowercase();
+    let (time, pm) = if let Some(time) = lower.strip_suffix("pm") {
+        (time.trim(), true)
+    } else if let Some(time) = lower.strip_suffix("am") {
+        (time.trim(), false)
+    } else {
+        return hint.trim().to_string();
+    };
+    let Some((hour, minute)) = time.split_once(':') else {
+        return hint.trim().to_string();
+    };
+    let Ok(hour) = hour.parse::<u32>() else {
+        return hint.trim().to_string();
+    };
+    if !(1..=12).contains(&hour) {
+        return hint.trim().to_string();
+    }
+    let hour = match (hour, pm) {
+        (12, false) => 0,
+        (12, true) => 12,
+        (hour, true) => hour + 12,
+        (hour, false) => hour,
+    };
+    format!("{hour:02}:{minute}")
+}
+
 /// The bar is rendered with the machine's local `date`, so use the same local
 /// calendar for HH:MM hints. Date-only/invalid hints use the policy
 /// fallback. No subprocess or global TZ mutation is needed.
@@ -226,6 +292,7 @@ fn reset_time(hint: &str, now: Ts) -> Option<Ts> {
     let mut target = unsafe { local.assume_init() };
     target.tm_sec = 0;
     target.tm_isdst = -1;
+    let hint = clock_24h(hint);
     if let Some((hour, minute)) = hint.split_once(':') {
         let hour = hour.parse::<i32>().ok().filter(|h| (0..24).contains(h))?;
         let minute = minute.parse::<i32>().ok().filter(|m| (0..60).contains(m))?;
@@ -246,6 +313,15 @@ fn reset_time(hint: &str, now: Ts) -> Option<Ts> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_twelve_hour_clock_reads_as_twenty_four() {
+        assert_eq!(clock_24h("11:36 PM"), "23:36");
+        assert_eq!(clock_24h("12:05am"), "00:05");
+        assert_eq!(clock_24h("12:30 PM"), "12:30");
+        assert_eq!(clock_24h("9:05 am"), "09:05");
+        assert_eq!(clock_24h("23:10"), "23:10");
+    }
 
     #[test]
     fn invalid_reset_hints_use_the_policy_fallback() {

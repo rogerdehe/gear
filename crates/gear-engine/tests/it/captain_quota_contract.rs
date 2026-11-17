@@ -12,6 +12,10 @@ fn screen(percent: u32) -> String {
 }
 
 fn world() -> (Store, FakeHerdr, EngineCfg) {
+    world_with("claude")
+}
+
+fn world_with(captain: &str) -> (Store, FakeHerdr, EngineCfg) {
     let mut store = Store::open_in_memory().unwrap();
     store
         .write(|tx| {
@@ -27,8 +31,8 @@ lanes = 1
 temps = 1
 [captain]
 pane = "w1:p1"
-kind = "claude"
-profile = "claude"
+kind = "CAPTAIN"
+profile = "CAPTAIN"
 [[lanes]]
 name = "heat"
 duty = "work"
@@ -38,9 +42,9 @@ profile = "opencode"
 [models]
 quota_reset_h = 1
 "#
-            .into();
+            .replace("CAPTAIN", captain);
             tx.update_project(&project)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP, "claude", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP, captain, T0)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T0)?;
             tx.insert_task(&TaskRow {
                 repo: None,
@@ -81,7 +85,7 @@ quota_reset_h = 1
         })
         .unwrap();
     let mut herdr = FakeHerdr::new();
-    herdr.add_agent(CAP, "claude", AgentStatus::Idle);
+    herdr.add_agent(CAP, captain, AgentStatus::Idle);
     herdr.add_agent(LANE, "opencode", AgentStatus::Idle);
     let mut cfg = EngineCfg::default();
     cfg.review_git = std::sync::Arc::new(crate::FakeReviewGit);
@@ -363,4 +367,32 @@ fn claudes_own_limit_record_pauses_without_a_quota_status_line() {
     tick(&mut store, &mut herdr, &cfg, reset).unwrap();
     assert_eq!(herdr.prompts_to(CAP).len(), 1);
     assert!(herdr.prompts_to(CAP)[0].contains("quota is back"));
+}
+
+/// selina, 2026-11-17: a codex captain has no limit log and no footer bar;
+/// its spent limit is a line on its screen. It pauses new work and stops the
+/// rings until the clock the line names, then the wake goes once.
+#[test]
+fn a_codex_captains_spent_limit_on_its_screen_pauses_it() {
+    let (mut store, mut herdr, cfg) = world_with("codex");
+    herdr.set_screen(
+        CAP,
+        "conversation\n\u{25a0} You\u{2019}ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at 11:36 PM.\n  2 background terminals running\n\u{203a} Ask Codex to do anything\n  gpt-6.1-sol high \u{b7} weekly 0% left\n",
+    );
+    tick(&mut store, &mut herdr, &cfg, T0 + 10).unwrap();
+    assert!(
+        herdr.prompts_to(LANE).is_empty(),
+        "a spent captain starts no new task"
+    );
+    let state = store.read(|tx| tx.captain_quota("p")).unwrap().unwrap();
+    assert!(!state.resumed);
+    assert!(
+        state.reset_at > T0 + 10 && state.reset_at <= T0 + 10 + 24 * 3600,
+        "{state:?}"
+    );
+    tick(&mut store, &mut herdr, &cfg, T0 + 20).unwrap();
+    assert!(
+        herdr.prompts_to(CAP).is_empty(),
+        "nothing rings a spent captain"
+    );
 }

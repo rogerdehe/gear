@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1294 -->
+<!-- gear-plan project=gear base=1295 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
