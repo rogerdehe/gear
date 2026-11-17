@@ -444,7 +444,7 @@ pub fn reclaim(
             if handled.contains(&branch.name) || upcoming(&branch.name) {
                 continue;
             }
-            if branch_on_integration(&repo.path, &config, &branch.tip) {
+            if branch_on_integration(&repo.path, &config, &repo.integration, &branch.tip) {
                 if let Err(reason) =
                     delete_remote_branch(&repo.path, &config.conventions.remote, &branch.name)
                 {
@@ -470,10 +470,10 @@ pub fn reclaim(
             && repo.integration != config.conventions.staging
             && repo.integration.starts_with(&format!("{project}/"))
         {
-            if let Some(tip) =
-                remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
+            if remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
+                .is_some()
             {
-                if branch_on_release(&repo.path, &config, &tip, &repo.release) {
+                if branch_on_release(&repo.path, &config, &repo.release, &repo.integration) {
                     let _ = delete_remote_branch(
                         &repo.path,
                         &config.conventions.remote,
@@ -1103,15 +1103,12 @@ fn remove_worktree(repo: &str, worktree: &ProjectWorktree) -> Result<(), String>
     Ok(())
 }
 
-/// Whether the branch's tip is on the integration branch.
-fn branch_on_integration(repo: &str, config: &ProjectConfig, tip: &str) -> bool {
+/// Whether the branch's tip is on the integration branch (M7.3): by ancestry,
+/// or through the `Gear-Candidate`/`Gear-Source` trailer of a squash commit.
+fn branch_on_integration(repo: &str, config: &ProjectConfig, integration: &str, tip: &str) -> bool {
     let remote = &config.conventions.remote;
-    let integration = format!("{remote}/{}", config.conventions.integration);
-    merge::git(
-        Path::new(repo),
-        &["merge-base", "--is-ancestor", tip, &integration],
-    )
-    .is_ok()
+    let integration = format!("{remote}/{integration}");
+    gear_app::base::landed_in(Path::new(repo), &integration, tip).unwrap_or(false)
 }
 
 /// The tip of a branch on the remote, if it is there (T-622).
@@ -1136,19 +1133,17 @@ fn remote_branch_tip(repo: &str, remote: &str, branch: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether the branch's tip is on the release branch (T-622).
-fn branch_on_release(repo: &str, config: &ProjectConfig, tip: &str, release: &str) -> bool {
+/// Whether the integration branch adds nothing to the release branch (T-622,
+/// M7.3): it is an ancestor of it, or its content is already there — a squash
+/// landed the same tree.
+fn branch_on_release(repo: &str, config: &ProjectConfig, release: &str, integration: &str) -> bool {
     let remote = &config.conventions.remote;
-    merge::git(
+    gear_app::base::adds_nothing(
         Path::new(repo),
-        &[
-            "merge-base",
-            "--is-ancestor",
-            tip,
-            &format!("{remote}/{release}"),
-        ],
+        &format!("{remote}/{release}"),
+        &format!("{remote}/{integration}"),
     )
-    .is_ok()
+    .unwrap_or(false)
 }
 
 /// Delete a branch on the remote.
@@ -1496,6 +1491,22 @@ merge_method = "merge"
                      git add -A && git commit -q -m 'later on dev' && git push -q origin dev"
                 ),
             );
+        }
+
+        /// The project's config with `integration` set to `branch`.
+        fn set_integration(&mut self, branch: &str) {
+            let text = config_text(&self.work).replace(
+                "integration = \"dev\"",
+                &format!("integration = \"{branch}\""),
+            );
+            self.store
+                .write(|tx| {
+                    let mut project = tx.get_project("p")?.unwrap();
+                    project.config_toml = text;
+                    tx.update_project(&project)?;
+                    Ok(())
+                })
+                .unwrap();
         }
 
         /// The project's config with `merge_method` set to `method`.
@@ -2327,6 +2338,151 @@ merge_method = "merge"
                 .iter()
                 .all(|item| !item.body.contains("branch dev")),
             "the integration branch is never named"
+        );
+    }
+
+    /// M7.3: a leftover task branch whose work was squashed onto the
+    /// integration branch counts as on it — the squash commit names it by
+    /// `Gear-Candidate` — and is deleted.
+    #[test]
+    fn a_task_branch_squashed_onto_the_integration_branch_is_deleted() {
+        let mut landed = Landed::new("squashed-branch");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/hull/t9 dev && echo work > work.txt && git add work.txt && \
+             git commit -q -m 'the work' && git push -q origin p/hull/t9 && git checkout -q dev",
+        );
+        let sha = sh(
+            &landed.root.path(),
+            &format!("git -C {} rev-parse p/hull/t9", landed.origin.display()),
+        );
+        sh(
+            &landed.work,
+            &format!(
+                "git commit -q --allow-empty -m 'T-9: the goal\n\nGear-Candidate: {sha}' && \
+                 git push -q origin dev"
+            ),
+        );
+
+        landed.reclaim(NOW + 600);
+
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.lines().any(|branch| branch == "p/hull/t9"),
+            "the squashed branch is deleted: {branches}"
+        );
+    }
+
+    /// M7.3: an integration branch squashed onto the release branch by a pull
+    /// request adds nothing to it, so the reclaim deletes it like one merged.
+    #[test]
+    fn an_integration_branch_squashed_onto_release_is_deleted() {
+        let mut landed = Landed::new("squashed-integration");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/dev dev && echo work > work.txt && git add work.txt && \
+             git commit -q -m 'the work' && git push -q origin p/dev",
+        );
+        // The same content reaches main by a squash (a pull request).
+        sh(
+            &landed.work,
+            "git checkout -q main && git merge -q --squash p/dev && git commit -q -m 'the work' && \
+             git push -q origin main",
+        );
+        landed.set_integration("p/dev");
+
+        landed.reclaim(NOW + 600);
+
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.lines().any(|branch| branch == "p/dev"),
+            "the integration branch whose content is on main is deleted: {branches}"
+        );
+    }
+
+    /// M7.3: an integration branch with a code change of its own is kept and
+    /// not named — the reclaim names no unreleased integration branch since
+    /// T-622 (M-8935).
+    #[test]
+    fn an_integration_branch_with_a_code_change_is_kept_and_not_named() {
+        let mut landed = Landed::new("integration-code");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/dev dev && echo work > work.txt && git add work.txt && \
+             git commit -q -m 'the work' && git push -q origin p/dev",
+        );
+        landed.set_integration("p/dev");
+
+        landed.reclaim(NOW + 600);
+
+        assert!(
+            landed
+                .origin_branches()
+                .lines()
+                .any(|branch| branch == "p/dev"),
+            "the branch with unreleased work is kept"
+        );
+        assert!(
+            landed
+                .items(RECLAIM_THREAD)
+                .iter()
+                .all(|item| !item.body.contains("branch p/dev")),
+            "the integration branch is not named"
+        );
+    }
+
+    /// M7.3 F1: a `[[repos]]` entry's own integration branch is checked against
+    /// itself, never the project default: the child's branch holds unreleased
+    /// work and stays, though the project's `dev` is on main.
+    #[test]
+    fn a_child_repos_own_integration_branch_is_checked_against_itself() {
+        let mut landed = Landed::new("child-repo");
+        let child_origin = landed.root.path().join("child-origin.git");
+        let child = landed.work.join("child");
+        sh(
+            landed.root.path(),
+            &format!("git init -q --bare {}", child_origin.display()),
+        );
+        sh(
+            landed.root.path(),
+            &format!(
+                "git clone -q {} {}",
+                child_origin.display(),
+                child.display()
+            ),
+        );
+        sh(
+            &child,
+            "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m base && \
+             git push -q origin HEAD:refs/heads/main HEAD:refs/heads/dev && \
+             git checkout -q -b p/feature && echo work > work.txt && git add work.txt && \
+             git -c user.name=t -c user.email=t@t commit -q -m work && \
+             git push -q origin p/feature",
+        );
+        landed
+            .store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = format!(
+                    "{}\n\n[[repos]]\nname = \"api\"\npath = \"child\"\nintegration = \"p/feature\"\nrelease = \"main\"\ngate = \"true\"\n",
+                    config_text(&landed.work)
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
+
+        landed.reclaim(NOW + 600);
+
+        let branches = sh(
+            &landed.root.path(),
+            &format!(
+                "git -C {} for-each-ref --format='%(refname:short)' refs/heads",
+                child_origin.display()
+            ),
+        );
+        assert!(
+            branches.lines().any(|branch| branch == "p/feature"),
+            "the child's own integration branch with unreleased work is kept: {branches}"
         );
     }
 
