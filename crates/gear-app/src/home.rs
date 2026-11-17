@@ -733,7 +733,20 @@ fn snapshot(
             .cmp(&(right.departure.unwrap_or(i64::MAX), &right.milestone))
     });
     for voyage in &voyages {
-        lines.push(format!("  {}", crate::plan::voyage_line(voyage)));
+        // T-708: the done sentence is the goal line's (stations.rs); this line
+        // names the voyage, its eta and its bar, once each.
+        let bar = voyage
+            .bar
+            .as_deref()
+            .and_then(|bar| bar.split_whitespace().next())
+            .unwrap_or("-");
+        lines.push(format!(
+            "  Voyage {} {} · eta {} · bar {}",
+            voyage.milestone,
+            voyage.title,
+            voyage.eta.as_deref().unwrap_or("-"),
+            bar
+        ));
     }
     Ok(lines)
 }

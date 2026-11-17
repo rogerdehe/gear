@@ -11287,6 +11287,36 @@ path="api"
         assert!(text.contains("departs at 14:00"), "{text}");
     }
 
+    /// T-708: the done sentence is on the page once, in the goal line; the
+    /// voyage line names the voyage, its eta and its bar.
+    #[test]
+    fn the_home_page_carries_the_done_sentence_once() {
+        let (mut store, mut herdr) = home_world();
+        seed_waiting_voyage(&mut store, None);
+
+        let mut out = Vec::new();
+        run_home(
+            &mut store,
+            &home_env("captain", CAP_PANE),
+            Some(&mut herdr as &mut dyn gear_herdr::HerdrRead),
+            T0,
+            false,
+            &mut out,
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.matches("it sails").count(), 1, "{text}");
+        assert!(
+            text.contains("Your goal, voyage M5: done: it sails"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Voyage M5 the next voyage · eta 2h · bar -"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn without_a_departure_time_the_home_voyage_line_is_unchanged() {
         let (mut store, mut herdr) = home_world();
@@ -11305,7 +11335,7 @@ path="api"
 
         let text = String::from_utf8(out).unwrap();
         assert!(
-            text.contains("Voyage M5 the next voyage · done: it sails"),
+            text.contains("Voyage M5 the next voyage · eta 2h · bar -"),
             "{text}"
         );
         assert!(!text.contains("departs at"), "{text}");
@@ -11351,7 +11381,7 @@ path="api"
 
         let text = String::from_utf8(out).unwrap();
         assert!(
-            text.contains("Voyage M5 the next voyage · done: it sails"),
+            text.contains("Voyage M5 the next voyage · eta 2h · bar -"),
             "{text}"
         );
         assert!(!text.contains("off hours until"), "{text}");
@@ -11376,7 +11406,7 @@ path="api"
 
         let text = String::from_utf8(out).unwrap();
         assert!(
-            text.contains("Voyage M5 the next voyage · done: it sails"),
+            text.contains("Voyage M5 the next voyage · eta 2h · bar -"),
             "{text}"
         );
         assert!(!text.contains("off hours until"), "{text}");
