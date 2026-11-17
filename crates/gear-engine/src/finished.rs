@@ -1295,6 +1295,9 @@ mod tests {
         origin: PathBuf,
         store: Store,
         herdr: gear_herdr::fake::FakeHerdr,
+        /// What the stub `herdr workspace list` answers: (id, label, agent
+        /// status). Empty by default.
+        workspaces: Vec<(String, String, String)>,
     }
 
     const CAP: &str = "p/captain/M1";
@@ -1468,6 +1471,7 @@ merge_method = "merge"
                 origin,
                 store,
                 herdr,
+                workspaces: Vec::new(),
             }
         }
 
@@ -1577,8 +1581,50 @@ merge_method = "merge"
                 .unwrap()
         }
 
+        /// The workspaces the stub `herdr workspace list` answers with.
+        fn set_workspaces(&mut self, workspaces: &[(&str, &str, &str)]) {
+            self.workspaces = workspaces
+                .iter()
+                .map(|(id, label, status)| (id.to_string(), label.to_string(), status.to_string()))
+                .collect();
+        }
+
+        /// Run the reclaim with a `herdr` on PATH that answers `workspace
+        /// list` with this fixture's workspaces. The finished tests run in
+        /// parallel in one process, so PATH is process-wide: the call holds a
+        /// lock and restores it, and each fixture writes its own stub (T-706:
+        /// a test saw another's `p-captain-m2` and named it).
         fn reclaim(&mut self, now: Ts) -> Option<&'static str> {
-            reclaim(&mut self.store, &mut self.herdr, "p", now).unwrap()
+            static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let bin = self.root.path().join("bin-herdr");
+            std::fs::create_dir_all(&bin).unwrap();
+            let list: Vec<serde_json::Value> = self
+                .workspaces
+                .iter()
+                .map(|(id, label, status)| {
+                    serde_json::json!({
+                        "workspace_id": id,
+                        "label": label,
+                        "agent_status": status,
+                    })
+                })
+                .collect();
+            let json = serde_json::json!({"result": {"workspaces": list}}).to_string();
+            let script = bin.join("herdr");
+            std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let old = std::env::var_os("PATH").unwrap_or_default();
+            std::env::set_var(
+                "PATH",
+                format!("{}:{}", bin.display(), old.to_string_lossy()),
+            );
+            let out = reclaim(&mut self.store, &mut self.herdr, "p", now).unwrap();
+            std::env::set_var("PATH", old);
+            out
         }
 
         /// The records step alone, without the reclaim's worktree removal.
@@ -2449,19 +2495,6 @@ merge_method = "merge"
         );
     }
 
-    /// A `herdr` on PATH whose `workspace list` names one workspace of the
-    /// project: the reclaim reads the real command, the fake answers the
-    /// remove and the close.
-    fn stub_workspace_list(dir: &Path, workspace: &str, label: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let script = dir.join("herdr");
-        let json = format!(
-            r#"{{"result":{{"workspaces":[{{"workspace_id":"{workspace}","label":"{label}","agent_status":"unknown"}}]}}}}"#
-        );
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
     /// A worktree the reclaim leaves (uncommitted changes) keeps its
     /// workspace: closing that workspace would remove the worktree with Herdr
     /// (Lawrence M-2692).
@@ -2479,16 +2512,8 @@ merge_method = "merge"
             ),
         );
         std::fs::write(home.join("gear.toml"), "x").unwrap();
-        let bin = landed.root.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        stub_workspace_list(&bin, "w1KM", "p-captain-m2");
-        let old = std::env::var_os("PATH").unwrap_or_default();
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", bin.display(), old.to_string_lossy()),
-        );
+        landed.set_workspaces(&[("w1KM", "p-captain-m2", "unknown")]);
         landed.reclaim(NOW + 600);
-        std::env::set_var("PATH", old);
 
         assert!(home.exists(), "the dirty worktree is kept");
         assert!(
@@ -2507,20 +2532,7 @@ merge_method = "merge"
     #[test]
     fn a_leaving_agents_workspace_is_named_only_after_its_grace() {
         let mut landed = Landed::new("agents-leaving");
-        let bin = landed.root.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let script = bin.join("herdr");
-            let json = r#"{"result":{"workspaces":[{"workspace_id":"w1KM","label":"p-heat","agent_status":"idle"}]}}"#;
-            std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let old = std::env::var_os("PATH").unwrap_or_default();
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", bin.display(), old.to_string_lossy()),
-        );
+        landed.set_workspaces(&[("w1KM", "p-heat", "idle")]);
         let named = |landed: &mut Landed| {
             landed
                 .items(RECLAIM_THREAD)
@@ -2531,7 +2543,6 @@ merge_method = "merge"
         let early = named(&mut landed);
         landed.reclaim(NOW + AGENTS_LEAVE_S + 60);
         let late = named(&mut landed);
-        std::env::set_var("PATH", old);
 
         assert!(!early, "an agent on its way out is not a leftover yet");
         assert!(late, "one still there after the grace is named");
@@ -2546,16 +2557,8 @@ merge_method = "merge"
         // The fake knows no worktree of w1KM, so `worktree_remove` is refused;
         // the pane under the workspace lets `workspace_close` succeed.
         landed.herdr.add_shell("w1KM:p1");
-        let bin = landed.root.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        stub_workspace_list(&bin, "w1KM", "p-merge");
-        let old = std::env::var_os("PATH").unwrap_or_default();
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", bin.display(), old.to_string_lossy()),
-        );
+        landed.set_workspaces(&[("w1KM", "p-merge", "unknown")]);
         let changed = landed.reclaim(NOW + 600);
-        std::env::set_var("PATH", old);
 
         assert_eq!(changed, None, "nothing is left to name");
         assert!(
