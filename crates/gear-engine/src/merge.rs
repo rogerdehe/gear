@@ -3967,6 +3967,13 @@ fn prepare_merge(
         },
     };
 
+    // 2b. the candidate may already be on the integration branch: a restart
+    //     after the push, or another task that carried it in. A squashed merge
+    //     names the candidate in a trailer, not by ancestry (M7.3), so this is
+    //     asked before step 3: a squash closes the task's branch, and the
+    //     restart must still answer "already merged".
+    let already = gear_app::base::landed_in(dir, &base_ref, &sha).unwrap_or(false);
+
     // 3. the candidate must be here and reachable from a pushed ref: work that
     //    was never pushed (or whose branch is gone) is not merged, and the
     //    captain is told why. The branch may have any name: the task's, a
@@ -3993,7 +4000,7 @@ fn prepare_merge(
         }
     };
     let pushed = Pushed::read(&pushed, &sha);
-    if pushed.refs.is_empty() {
+    if pushed.refs.is_empty() && !already {
         // The candidate may not be pushed yet: the lane pushes it and the
         // merge retries. Only the bounded retry decides whether it was never
         // pushed (F2 of the T-61 review).
@@ -4023,8 +4030,7 @@ fn prepare_merge(
     }
 
     // 5. the candidate may already be on the integration branch: a restart
-    //    after the push, or another task that carried it in.
-    let already = ahead.is_some_and(|ahead| ahead.trim().is_empty());
+    //    after the push, or another task that carried it in (step 2b).
 
     // 6. the merges, in order (the approved candidate, then the review
     //    branch); the candidate is pinned by sha, so a branch that moves later
@@ -6679,7 +6685,7 @@ fn on_a_stable_branch(config: &ProjectConfig, repo: &Repo, candidate: &str) -> b
         .into_iter()
         .any(|branch| {
             let reference = format!("refs/remotes/{}/{branch}", config.conventions.remote);
-            is_ancestor(dir, candidate, &reference)
+            gear_app::base::landed_in(dir, &reference, candidate).unwrap_or(false)
         })
 }
 
@@ -6759,7 +6765,7 @@ fn land_carried(store: &mut Store, project: &str, config: &ProjectConfig) -> Gea
                 &repo.integration,
             ],
         );
-        if !is_ancestor(dir, &candidate, &reference) {
+        if !gear_app::base::landed_in(dir, &reference, &candidate).unwrap_or(false) {
             continue;
         }
         store.write(|tx| {
@@ -9350,6 +9356,15 @@ mod tests {
     fn a_told_lost_task_whose_candidate_landed_closes_its_items() {
         let scratch = Scratch::new("merge-lost-landed-later");
         let candidate = scratch.head_of("heat/t5");
+        assert_eq!(
+            gear_app::base::landed_in(&scratch.work, "refs/remotes/origin/dev", &candidate),
+            Ok(true),
+            "the squash names the candidate: {}",
+            sh(
+                &scratch.work,
+                "git log --format=%B -1 refs/remotes/origin/dev"
+            )
+        );
         let mut store = world(TaskState::Ready);
         store
             .write(|tx| {
@@ -17607,5 +17622,86 @@ gate = "{project_gate}"
         assert_eq!(merged.len(), 1);
         assert_eq!(op_state(&mut store, "O-1"), Some(OpState::Confirmed));
         assert!(cfg.merges.idle(), "nothing runs any more");
+    }
+
+    // ---- T-696: the merged checks accept a squash ------------------------
+
+    /// T-696: a squash lands one commit on the integration branch and closes
+    /// the task's branch. A restart of the same merge op finds no branch, but
+    /// the candidate is named by the squashed commit's trailer: it says the
+    /// merge already happened and pushes nothing.
+    #[test]
+    fn a_restart_after_a_squash_merge_says_it_was_already_merged() {
+        let scratch = Scratch::new("squash-restart");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The squash the engine writes in squash mode: one commit on dev whose
+        // message names the candidate, and the task's branches closed.
+        sh(
+            &scratch.work,
+            &format!(
+                "git switch -q dev && echo s > s5.txt && git add -A \
+                 && git -c user.name=a -c user.email=a@b commit -qm 'T-5: the task' \
+                    -m 'Gear-Candidate: {candidate}' \
+                 && git push -q origin dev && git fetch -q origin"
+            ),
+        );
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/heat/t5 && \
+             git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+        let before = scratch.head_of("dev");
+
+        let merged = merge_one(&worktree, &repo("true"), &op(&candidate));
+
+        assert!(merged.is_ok(), "{merged:?}");
+        assert!(
+            merged.unwrap_or_default().contains("already merged"),
+            "the restart says the merge happened"
+        );
+        assert_eq!(scratch.head_of("dev"), before, "nothing is pushed");
+    }
+
+    /// T-696: the lost-merge scan does not name a task whose candidate landed
+    /// in a squashed commit: the commit names it in a trailer, not by ancestry.
+    #[test]
+    fn a_squashed_candidate_is_not_named_lost() {
+        let scratch = Scratch::new("merge-lost-squashed");
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            &format!(
+                "git switch -q dev && echo s > s5.txt && git add -A \
+                 && git -c user.name=a -c user.email=a@b commit -qm 'T-5: the task' \
+                    -m 'Gear-Candidate: {candidate}' \
+                 && git push -q origin dev && git fetch -q origin"
+            ),
+        );
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(items.is_empty(), "the work is on the branch: {items:?}");
+        assert!(
+            store
+                .read(|tx| tx.get_meta(&merge_lost_landed_key("p", "T-5", 1)))
+                .unwrap()
+                .is_some(),
+            "the landed answer is kept"
+        );
     }
 }

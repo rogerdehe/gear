@@ -664,7 +664,7 @@ fn scan(input: &Input) -> Result<Findings, String> {
         // scan (T-431).
         if let Some(candidate) = &task.candidate {
             if let Some(candidate) = tips.revision(candidate) {
-                if ancestor(&input.repo, &candidate, &base_tip)? {
+                if gear_app::base::landed_in(&input.repo, &base_tip, &candidate).unwrap_or(false) {
                     continue;
                 }
             }
@@ -1645,6 +1645,46 @@ profile = "codex"
         assert!(
             !found.pairs.contains_key("tasks:T-1:T-2"),
             "read against the remote's feature branch: {found:?}"
+        );
+    }
+
+    /// T-696: a task whose candidate landed in a squashed commit on the
+    /// integration branch is not an open change: the commit names the
+    /// candidate in a trailer, not by ancestry.
+    #[test]
+    fn a_task_squashed_onto_the_integration_branch_is_not_an_open_change() {
+        let path = repo();
+        sh(&path, &["switch", "-q", "dev"]);
+        commit(&path, "dev moves", SRC, "dev moves\n");
+        sh(&path, &["switch", "-q", "steady/t2"]);
+        commit(&path, "steady moves", SRC, "steady src\n");
+        let candidate = sh(&path, &["rev-parse", "heat/t1"]);
+        // The squash: one commit on dev whose message names the candidate.
+        sh(&path, &["switch", "-q", "dev"]);
+        std::fs::write(path.join(SRC), "heat squashed\n").unwrap();
+        sh(&path, &["add", "--", SRC]);
+        sh(
+            &path,
+            &[
+                "commit",
+                "-qm",
+                "T-1: heat",
+                "-m",
+                &format!("Gear-Candidate: {candidate}"),
+            ],
+        );
+        let mut store = store(&path);
+        store_with_candidates(&path, &mut store);
+
+        let found = scanned(&mut store, T0);
+
+        assert!(
+            !found.pairs.contains_key("tasks:T-1:T-2"),
+            "T-1 landed: {found:?}"
+        );
+        assert!(
+            !found.integration.contains_key("integration:T-1"),
+            "T-1 is no open change: {found:?}"
         );
     }
 }
