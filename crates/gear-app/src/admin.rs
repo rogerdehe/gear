@@ -1676,6 +1676,25 @@ fn retire_excess_temps(tx: &Tx<'_>, project: &str, quota: u32, now: Ts) -> GearR
 
 /// Note that `who` may start the CLI `kind` (T-83): once per kind, the first
 /// seat that names it.
+/// Every agent CLI the project may start: the captain's, each lane's and the
+/// reviewers' kind, and every CLI a model chain names (T-35). The captain's
+/// home page names a stale skill copy only for these (selina, 2026-11-17: an
+/// `omp` copy no seat of the project uses was named on every page).
+pub fn project_kinds(config: &config::ProjectConfig) -> Vec<String> {
+    let mut kinds: Vec<(String, String)> = Vec::new();
+    note_kind(&mut kinds, &config.captain.kind, "");
+    for lane in &config.lanes {
+        note_kind(&mut kinds, &lane.kind, "");
+        note_chain(&mut kinds, config::lane_chain(config, lane), "");
+    }
+    if let Some(temps) = &config.temps {
+        note_kind(&mut kinds, &temps.kind, "");
+    }
+    note_chain(&mut kinds, &config.models.review, "");
+    note_chain(&mut kinds, &config.models.captain, "");
+    kinds.into_iter().map(|(kind, _)| kind).collect()
+}
+
 fn note_kind(kinds: &mut Vec<(String, String)>, kind: &str, who: &str) {
     let kind = kind.trim();
     if kind.is_empty() || kinds.iter().any(|(seen, _)| seen == kind) {
