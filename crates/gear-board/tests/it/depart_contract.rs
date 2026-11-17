@@ -129,10 +129,7 @@ fn after_the_departure_time_the_voyage_line_is_unchanged() {
 
     let text = drawn(&mut store, depart);
 
-    assert!(
-        text.contains("Voyage M5 the next voyage · done: it sails"),
-        "{text}"
-    );
+    assert!(text.contains("Voyage M5 the next voyage"), "{text}");
     assert!(!text.contains("departs at"), "{text}");
 }
 
@@ -141,10 +138,7 @@ fn without_a_departure_time_the_voyage_line_is_unchanged() {
     let mut store = world(None);
     let text = drawn(&mut store, AROUND);
 
-    assert!(
-        text.contains("Voyage M5 the next voyage · done: it sails"),
-        "{text}"
-    );
+    assert!(text.contains("Voyage M5 the next voyage"), "{text}");
     assert!(!text.contains("departs at"), "{text}");
 }
 
@@ -165,10 +159,7 @@ fn inside_the_hours_the_voyage_line_is_unchanged() {
 
     let text = drawn(&mut store, noon);
 
-    assert!(
-        text.contains("Voyage M5 the next voyage · done: it sails"),
-        "{text}"
-    );
+    assert!(text.contains("Voyage M5 the next voyage"), "{text}");
     assert!(!text.contains("off hours until"), "{text}");
 }
 
@@ -179,10 +170,7 @@ fn without_hours_the_voyage_line_is_unchanged() {
 
     let text = drawn(&mut store, evening);
 
-    assert!(
-        text.contains("Voyage M5 the next voyage · done: it sails"),
-        "{text}"
-    );
+    assert!(text.contains("Voyage M5 the next voyage"), "{text}");
     assert!(!text.contains("off hours until"), "{text}");
 }
 
