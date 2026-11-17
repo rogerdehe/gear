@@ -2461,7 +2461,7 @@ fn run_bisect(dir: &Path, job: &BisectJob) -> Option<String> {
             "log",
             "--first-parent",
             "--reverse",
-            "--format=%H%x09%P%x09%s",
+            "--format=%H%x09%P%x09%s%x09%(trailers:key=Gear-Task,valueonly,separator=%x2C)",
             &format!("{fork}..{tip}"),
         ])
         .ok()?,
@@ -2549,25 +2549,40 @@ fn run_bisect(dir: &Path, job: &BisectJob) -> Option<String> {
     ))
 }
 
-/// The members of a feature branch from a first-parent `git log` (T-598): the
-/// merge commits after the fork, oldest first.
+/// The members of a feature branch from a first-parent `git log` (T-598,
+/// T-695): the merge commits after the fork, oldest first, and the squashed
+/// members — non-merge commits whose message carries a `Gear-Task` trailer,
+/// named by that trailer's task. A merge commit's own subject names its task
+/// as before.
 fn bisect_members(log: &str, merge_message: &str) -> Vec<BisectMember> {
     log.lines()
         .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
+            let mut fields = line.splitn(4, '\t');
             let sha = fields.next()?.trim();
             let parents = fields.next()?.split_whitespace().count();
             let subject = fields.next().unwrap_or_default();
-            // A merge commit is a member: the single commits on the line are
-            // the feature's own work, not a member's merge.
-            if sha.is_empty() || parents < 2 {
+            let trailer = fields.next().unwrap_or_default();
+            if sha.is_empty() {
                 return None;
             }
-            let name =
-                member_of(subject, merge_message).unwrap_or_else(|| sha.chars().take(7).collect());
+            if parents >= 2 {
+                // A merge commit is a member: the single commits on the line
+                // are the feature's own work, not a member's merge.
+                let name = member_of(subject, merge_message)
+                    .unwrap_or_else(|| sha.chars().take(7).collect());
+                return Some(BisectMember {
+                    sha: sha.to_string(),
+                    name,
+                });
+            }
+            // A squashed member: its own commit carries the task's trailer.
+            let task = trailer
+                .split(',')
+                .map(str::trim)
+                .find(|task| !task.is_empty())?;
             Some(BisectMember {
                 sha: sha.to_string(),
-                name,
+                name: task.to_string(),
             })
         })
         .collect()
@@ -3963,6 +3978,13 @@ fn prepare_merge(
         },
     };
 
+    // 2b. the candidate may already be on the integration branch: a restart
+    //     after the push, or another task that carried it in. A squashed merge
+    //     names the candidate in a trailer, not by ancestry (M7.3), so this is
+    //     asked before step 3: a squash closes the task's branch, and the
+    //     restart must still answer "already merged".
+    let already = gear_app::base::landed_in(dir, &base_ref, &sha).unwrap_or(false);
+
     // 3. the candidate must be here and reachable from a pushed ref: work that
     //    was never pushed (or whose branch is gone) is not merged, and the
     //    captain is told why. The branch may have any name: the task's, a
@@ -3989,7 +4011,7 @@ fn prepare_merge(
         }
     };
     let pushed = Pushed::read(&pushed, &sha);
-    if pushed.refs.is_empty() {
+    if pushed.refs.is_empty() && !already {
         // The candidate may not be pushed yet: the lane pushes it and the
         // merge retries. Only the bounded retry decides whether it was never
         // pushed (F2 of the T-61 review).
@@ -4019,8 +4041,7 @@ fn prepare_merge(
     }
 
     // 5. the candidate may already be on the integration branch: a restart
-    //    after the push, or another task that carried it in.
-    let already = ahead.is_some_and(|ahead| ahead.trim().is_empty());
+    //    after the push, or another task that carried it in (step 2b).
 
     // 6. the merges, in order (the approved candidate, then the review
     //    branch); the candidate is pinned by sha, so a branch that moves later
@@ -4137,21 +4158,32 @@ fn prepare_merge(
                 .get("merge_message")
                 .and_then(|message| message.as_str())
                 .unwrap_or(gear_model::commit::MERGE_MESSAGE);
-            if let Ok(merges) = git(
+            if let Ok(commits) = git(
                 dir,
                 &[
                     "log",
                     "--first-parent",
-                    "--merges",
-                    "--format=%H%x09%s",
+                    "--format=%H%x09%P%x09%s%x09%(trailers:key=Gear-Task,valueonly,separator=%x2C)",
                     &format!("{sha}..{tip}"),
                 ],
             ) {
-                for line in merges.lines() {
-                    if let Some((commit, subject)) = line.split_once('\t') {
+                for line in commits.lines() {
+                    let mut fields = line.splitn(4, '\t');
+                    let Some(commit) = fields.next() else {
+                        continue;
+                    };
+                    let parents = fields.next().unwrap_or_default().split_whitespace().count();
+                    let subject = fields.next().unwrap_or_default();
+                    let trailer = fields.next().unwrap_or_default();
+                    if parents >= 2 {
                         if member_of(subject, merge_message).is_some() {
                             members_in.push(format!("{commit}^2"));
                         }
+                    } else if !trailer.trim().is_empty() {
+                        // A squashed member (T-695): its own commit carries the
+                        // task's trailer, and it is left out of the foreign
+                        // check by its own commit, not a second parent.
+                        members_in.push(commit.to_string());
                     }
                 }
             }
@@ -4337,7 +4369,19 @@ fn prepare_merge(
         // No goal: the subject is the task id alone (M7.3 rework F1), never
         // the unfilled merge template.
         let goal = if goal.trim().is_empty() { "" } else { goal };
-        let sources: Vec<String> = merges.iter().map(|(target, _)| target.clone()).collect();
+        // The trailer names the commit, not the ref the merge read (F2): a
+        // legacy review branch is a ref name, and its sha is what landed.
+        let sources: Vec<String> = merges
+            .iter()
+            .map(|(target, _)| {
+                git(
+                    dir,
+                    &["rev-parse", "--verify", &format!("{target}^{{commit}}")],
+                )
+                .map(|sha| sha.trim().to_string())
+                .unwrap_or_else(|_| target.clone())
+            })
+            .collect();
         let message = gear_model::commit::squash_message(
             &task,
             &op_attempt(op),
@@ -6722,7 +6766,7 @@ fn on_a_stable_branch(config: &ProjectConfig, repo: &Repo, candidate: &str) -> b
         .into_iter()
         .any(|branch| {
             let reference = format!("refs/remotes/{}/{branch}", config.conventions.remote);
-            is_ancestor(dir, candidate, &reference)
+            gear_app::base::landed_in(dir, &reference, candidate).unwrap_or(false)
         })
 }
 
@@ -6802,7 +6846,7 @@ fn land_carried(store: &mut Store, project: &str, config: &ProjectConfig) -> Gea
                 &repo.integration,
             ],
         );
-        if !is_ancestor(dir, &candidate, &reference) {
+        if !gear_app::base::landed_in(dir, &reference, &candidate).unwrap_or(false) {
             continue;
         }
         store.write(|tx| {
@@ -7556,7 +7600,9 @@ fn tell_captain_lost(
                     "refs/remotes/{}/{}",
                     config.conventions.remote, repo.integration
                 );
-                if is_ancestor(Path::new(&repo.path), &candidate, &reference) {
+                if gear_app::base::landed_in(Path::new(&repo.path), &reference, &candidate)
+                    .unwrap_or(false)
+                {
                     store.write(|tx| {
                         tx.set_attempt_time(project, &task, attempt, AttemptStep::Merged, now)?;
                         tx.set_meta(
@@ -7595,7 +7641,8 @@ fn tell_captain_lost(
             "refs/remotes/{}/{}",
             config.conventions.remote, repo.integration
         );
-        if is_ancestor(Path::new(&repo.path), &candidate, &reference) {
+        if gear_app::base::landed_in(Path::new(&repo.path), &reference, &candidate).unwrap_or(false)
+        {
             store.write(|tx| {
                 tx.set_attempt_time(project, &task, attempt, AttemptStep::Merged, now)?;
                 tx.set_meta(
@@ -15665,6 +15712,41 @@ gate = "{project_gate}"
         assert!(merge_one(&worktree, &repo("true"), &carrier).is_err());
     }
 
+    /// T-695: a feature's integration task merges the squashed members GEAR
+    /// landed on the feature branch after its candidate — commits whose
+    /// message carries a `Gear-Task` trailer — and no lane commit after the
+    /// candidate is refused as foreign.
+    #[test]
+    fn a_squashed_member_after_the_candidate_merges_with_the_integration_task() {
+        let scratch = Scratch::new("task-branch-squashed-member");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            "git switch -q heat/t5 && echo m > m6.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'T-6: fix the findings' -m 'Gear-Task: T-6' \
+             && echo n > m7.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'T-7: fix the rest' -m 'Gear-Task: T-7' \
+             && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass'",
+        );
+        publish(&scratch.work, "heat/t5");
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+        let mut carrier = op(&candidate);
+        carrier.payload["keep_branch"] = serde_json::json!(true);
+
+        let merged = merge_one(&worktree, &repo("true"), &carrier);
+
+        assert!(merged.is_ok(), "{merged:?}");
+        assert!(scratch.dev_has_task_commit());
+        let log = scratch.dev_log();
+        assert!(log.contains("T-6: fix the findings"), "{log}");
+        assert!(log.contains("T-7: fix the rest"), "{log}");
+    }
+
     /// T-564: a lane commit pushed onto the task branch after the hand-in is
     /// not merged (prometheus, 2026-11-04: hull's fix on T-562 would have
     /// landed unreviewed). The op fails `stuck` and names the commit.
@@ -17109,6 +17191,30 @@ gate = "{project_gate}"
         out.trim().to_string()
     }
 
+    /// A feature branch of three squashed members, the way GEAR lands them
+    /// (T-695): one commit per member, its message carrying `Gear-Task: T-n`.
+    /// The second member adds `b.txt`, the file [`MEMBER_GATE`] fails on.
+    /// Returns the tip and the second member's commit.
+    fn feature_with_squashed_members(pair: &Pair) -> (String, String) {
+        let out = sh(
+            &pair.work,
+            "git fetch -q origin && \
+             git switch -qC p/feature/f-1 origin/dev && \
+             echo a > a.txt && git add -A \
+               && git -c user.email=a@b -c user.name=a commit -qm 'T-1: member one' -m 'Gear-Task: T-1' && \
+             echo b > b.txt && git add -A \
+               && git -c user.email=a@b -c user.name=a commit -qm 'T-2: member two' -m 'Gear-Task: T-2' && \
+             echo c > c.txt && git add -A \
+               && git -c user.email=a@b -c user.name=a commit -qm 'T-3: member three' -m 'Gear-Task: T-3' && \
+             git rev-parse HEAD HEAD~1",
+        );
+        publish(&pair.work, "p/feature/f-1");
+        let mut lines = out.lines().map(str::trim);
+        let tip = lines.next().unwrap_or_default().to_string();
+        let second = lines.next().unwrap_or_default().to_string();
+        (tip, second)
+    }
+
     /// The two worktrees a bisect needs beside the pair's own: the merge
     /// worktree, and the bisect worktree on the seat's branch (T-598). Both are
     /// real, and both are what Herdr hands back.
@@ -17254,6 +17360,55 @@ gate = "{project_gate}"
         let meta = bisect_meta(&mut store);
         assert_eq!(meta.len(), 1, "{meta:?}");
         assert_eq!(meta[0].1, "started", "{meta:?}");
+        assert_eq!(pair.dev_log(), "dev", "nothing was pushed by the bisect");
+    }
+
+    /// T-695: a feature branch of three squashed members — commits carrying a
+    /// `Gear-Task` trailer, no merge commits — bisects to the member that
+    /// turns the gate red, named by its trailer.
+    #[test]
+    fn a_red_feature_gate_names_the_squashed_member_that_turned_it_red() {
+        let pair = Pair::new("bisect-squashed", false);
+        let (tip, second) = feature_with_squashed_members(&pair);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        bisect_worktrees(&pair, &mut herdr);
+        let mut store = feature_store(
+            &pair.work,
+            MEMBER_GATE,
+            "T-9",
+            None,
+            None,
+            Some("p/feature/f-1"),
+            &tip,
+        );
+        let cfg = fixture_cfg();
+
+        let mut seen = cfg.merges.progress();
+        merge_step(&mut store, &mut herdr, &cfg, 20);
+        merge_step(&mut store, &mut herdr, &cfg, 21);
+        let item = open_failed_item(&mut store, "T-9");
+        assert!(item.contains("gate failed"), "{item}");
+
+        while cfg.merges.bisect_running("p") {
+            assert!(
+                cfg.merges.wait_progress(seen, WAIT),
+                "the bisect did not report within {WAIT:?}"
+            );
+            seen = cfg.merges.progress();
+        }
+        merge_step(&mut store, &mut herdr, &cfg, 23);
+
+        let item = open_failed_item(&mut store, "T-9");
+        let expected = format!("bisect: the gate turns red at merge(T-2) {second}");
+        assert!(item.contains(&expected), "{item:?} lacks {expected:?}");
+        assert!(
+            !item.contains("merge(T-1)"),
+            "the first member is green: {item}"
+        );
+        assert!(
+            !item.contains("merge(T-3)"),
+            "the third member is after the red: {item}"
+        );
         assert_eq!(pair.dev_log(), "dev", "nothing was pushed by the bisect");
     }
 
@@ -17731,5 +17886,95 @@ gate = "{project_gate}"
         let subject = sh(&scratch.root, "git -C origin.git log -1 --format=%s dev");
         assert_eq!(subject, "T-5", "the task id alone: {subject}");
         assert!(!subject.contains('{'), "no placeholder: {subject}");
+    }
+
+    // ---- T-696: the merged checks accept a squash ------------------------
+
+    /// T-696: a squash lands one commit on the integration branch and closes
+    /// the task's branch. A restart of the same merge op finds no branch, but
+    /// the candidate is named by the squashed commit's trailer: it says the
+    /// merge already happened and pushes nothing.
+    #[test]
+    fn a_restart_after_a_squash_merge_says_it_was_already_merged() {
+        let scratch = Scratch::new("squash-restart");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        // The squash the engine writes in squash mode: one commit on dev whose
+        // message names the candidate, and the task's branches closed.
+        sh(
+            &scratch.work,
+            &format!(
+                "git switch -q dev && echo s > s5.txt && git add -A \
+                 && git -c user.name=a -c user.email=a@b commit -qm 'T-5: the task' \
+                    -m 'Gear-Candidate: {candidate}' \
+                 && git push -q origin dev && git fetch -q origin"
+            ),
+        );
+        sh(
+            &scratch.root,
+            "git -C origin.git update-ref -d refs/heads/heat/t5 && \
+             git -C origin.git update-ref -d refs/heads/review/t5",
+        );
+        let before = scratch.head_of("dev");
+
+        let merged = merge_one(&worktree, &repo("true"), &op(&candidate));
+
+        assert!(merged.is_ok(), "{merged:?}");
+        assert!(
+            merged.unwrap_or_default().contains("already merged"),
+            "the restart says the merge happened"
+        );
+        assert_eq!(scratch.head_of("dev"), before, "nothing is pushed");
+    }
+
+    /// T-696: the lost-merge scan does not name a task whose candidate landed
+    /// in a squashed commit: the commit names it in a trailer, not by ancestry.
+    #[test]
+    fn a_squashed_candidate_is_not_named_lost() {
+        let scratch = Scratch::new("merge-lost-squashed");
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            &format!(
+                "git switch -q dev && echo s > s5.txt && git add -A \
+                 && git -c user.name=a -c user.email=a@b commit -qm 'T-5: the task' \
+                    -m 'Gear-Candidate: {candidate}' \
+                 && git push -q origin dev && git fetch -q origin"
+            ),
+        );
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        assert_eq!(
+            gear_app::base::landed_in(&scratch.work, "refs/remotes/origin/dev", &candidate),
+            Ok(true),
+            "the squash names the candidate: {}",
+            sh(
+                &scratch.work,
+                "git log --format=%B -1 refs/remotes/origin/dev"
+            )
+        );
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(items.is_empty(), "the work is on the branch: {items:?}");
+        assert!(
+            store
+                .read(|tx| tx.get_meta(&merge_lost_landed_key("p", "T-5", 1)))
+                .unwrap()
+                .is_some(),
+            "the landed answer is kept"
+        );
     }
 }

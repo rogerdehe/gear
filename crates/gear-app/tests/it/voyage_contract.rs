@@ -1212,7 +1212,7 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
     assert_eq!(report.slowest, Some(("T-1".into(), 120)));
     let lines = report.lines();
     assert_eq!(lines.len(), 5);
-    assert_eq!(lines[0], "Voyage M2 course · done: ship the voyage");
+    assert_eq!(lines[0], "Voyage M2 course");
     assert_eq!(lines[1], "  elapsed 180m / eta 8h");
     assert_eq!(
         lines[2],

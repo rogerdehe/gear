@@ -93,6 +93,37 @@ impl Repos {
         )
     }
 
+    /// A commit on a branch of its own, changing `path`; it is not on `dev`.
+    fn side_commit(&self, branch: &str, path: &str, content: &str) -> String {
+        git(&self.repo, &["checkout", "-q", "-b", branch, "dev"]);
+        let full = self.repo.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, content).unwrap();
+        git(&self.repo, &["add", path]);
+        git(&self.repo, &["commit", "-q", "-m", "side work"]);
+        let sha = git(&self.repo, &["rev-parse", "HEAD"]);
+        git(&self.repo, &["checkout", "-q", "dev"]);
+        sha
+    }
+
+    /// A squash on `dev` whose message names `sha` by its `Gear-Candidate`
+    /// trailer; `sha` itself is not an ancestor of `dev`.
+    fn squash_naming(&self, sha: &str) -> String {
+        git(&self.repo, &["checkout", "-q", "dev"]);
+        git(
+            &self.repo,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                &format!("T-1: the goal\n\nGear-Candidate: {sha}"),
+            ],
+        );
+        git(&self.repo, &["push", "-q", "origin", "dev"]);
+        git(&self.repo, &["rev-parse", "HEAD"])
+    }
+
     /// A commit that is not on the integration branch: its tree is nowhere in
     /// `origin/dev`.
     fn other_candidate(&self) -> String {
@@ -501,4 +532,70 @@ fn a_candidate_that_was_never_pushed_takes_the_captains_attribution() {
 
     let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
     assert_eq!(times.merged, Some(NOW + 10), "marked merged by T-2's merge");
+}
+
+/// M7.3: a candidate landed by a squash is on the integration branch through
+/// the `Gear-Candidate` trailer its squash commit carries, though its own sha
+/// is no ancestor.
+#[test]
+fn a_squashed_candidate_counts_as_merged() {
+    let repos = Repos::new();
+    let candidate = repos.side_commit("side-squash", "src/heat/x.rs", "the work\n");
+    repos.squash_naming(&candidate);
+    let mut s = world(&repos, &candidate);
+    let text = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={candidate} pass evidence=ops/reports/T-1.md integrated-by=T-2\n"
+    );
+
+    run(&mut s, &text, "r1").unwrap();
+
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, Some(NOW + 10), "marked merged by T-2's merge");
+}
+
+/// M7.3: an integrated-by pass whose candidate differs from the integration
+/// branch only in the voyage's records is accepted: the records are the
+/// captain's own files, and the work landed.
+#[test]
+fn a_candidate_that_differs_only_in_voyage_records_is_accepted() {
+    let repos = Repos::new();
+    let candidate = repos.side_commit(
+        "side-records",
+        "gear/voyages/M1/reports/T-1.md",
+        "the report\n",
+    );
+    let mut s = world(&repos, &candidate);
+    let text = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={candidate} pass evidence=ops/reports/T-1.md integrated-by=T-2\n"
+    );
+
+    run(&mut s, &text, "r1").unwrap();
+
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, Some(NOW + 10), "marked merged by T-2's merge");
+}
+
+/// M7.3: a candidate that differs from the integration branch in a code file
+/// is still refused, with today's text.
+#[test]
+fn a_candidate_that_differs_in_a_code_file_is_still_refused() {
+    let repos = Repos::new();
+    let candidate = repos.side_commit("side-code", "src/heat/x.rs", "the work\n");
+    let mut s = world(&repos, &candidate);
+    let text = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={candidate} pass evidence=ops/reports/T-1.md integrated-by=T-2\n"
+    );
+
+    let err = run(&mut s, &text, "r1").unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
+    assert!(err.detail.contains("not in dev"), "{}", err.detail);
+    assert!(
+        err.detail
+            .contains("a pass may name the task whose merge landed the work only when that work is in the integration branch"),
+        "today's text: {}",
+        err.detail
+    );
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, None, "nothing was settled");
 }

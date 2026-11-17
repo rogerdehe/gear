@@ -23,6 +23,10 @@ pub struct ApplyResult {
     pub version: i64,
     /// Ids assigned to `## NEW` blocks, in draft order.
     pub created: Vec<String>,
+    /// The `NEW:<label>` labels of this draft and the ids they got, in draft
+    /// order (M7.3): the file rewrite turns each label into its id.
+    #[serde(default)]
+    pub labels: Vec<(String, String)>,
     /// Existing tasks whose contract got a new version: (id, new version).
     pub contract_changed: Vec<(String, i64)>,
     /// Non-terminal tasks the draft did not mention (kept, ranked after the listed ones).
@@ -195,6 +199,12 @@ pub fn apply(
             let departed = departed_voyages(tx, &ctx.project)?;
             fix_departures(tx, &ctx.project, now)?;
             record_voyages(tx, &ctx.project, draft, &departed, now)?;
+            // M7.3: the measured speed of the lanes' models against the
+            // voyage's eta, on the apply that departs it (or a confirmed one
+            // on a voyage that already departed).
+            if let Some(line) = speed_eta_line(tx, &ctx.project, draft, &guard.0, now)? {
+                result.warnings.push(line);
+            }
             // T-473: a `- drop <milestone>` removes a milestone with no task
             // and no history. It runs after the voyages so a task moved out in
             // this same apply no longer holds it, and after the queue so the
@@ -410,6 +420,14 @@ fn apply_queue(
         .cloned()
         .chain(new_ids.values().cloned())
         .collect();
+    // M7.3: the labels of the draft's NEW blocks, so a block may depend on
+    // another by name instead of guessing its id.
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+    for (index, item) in draft.queue.iter().enumerate() {
+        if let (Some(label), Some(id)) = (&item.label, new_ids.get(&index)) {
+            labels.insert(label.clone(), id.clone());
+        }
+    }
 
     // What the cancellations of this apply did (T-112).
     let mut cancelled: Vec<String> = Vec::new();
@@ -638,7 +656,24 @@ fn apply_queue(
                 ));
             }
         }
+        // M7.3: `deps: NEW:<label>` names a block of this draft; it becomes
+        // that block's id before the dep is checked.
+        let mut deps: Vec<String> = Vec::new();
         for dep in &item.deps {
+            match dep.strip_prefix("NEW:") {
+                Some(label) => match labels.get(label) {
+                    Some(id) => deps.push(id.clone()),
+                    None => {
+                        return Err(bad(
+                            item.line,
+                            format!("dep NEW:{label} names no block of this draft"),
+                        ));
+                    }
+                },
+                None => deps.push(dep.clone()),
+            }
+        }
+        for dep in &deps {
             if !known.contains(dep) {
                 return Err(bad(
                     item.line,
@@ -765,7 +800,7 @@ fn apply_queue(
                 ));
             }
         }
-        graph.insert(id, item.deps.clone());
+        graph.insert(id, deps.clone());
     }
     // (2) A task outside a feature never waits for one of its members (T-587):
     // a member's work reaches the integration branch only when the feature's
@@ -968,6 +1003,8 @@ fn apply_queue(
     // 6. writes.
     let mut created: Vec<String> = Vec::new();
     let mut contract_changed: Vec<(String, i64)> = Vec::new();
+    // M7.3: the tasks whose estimate this apply sets or changes, with it.
+    let mut estimate_changes: Vec<(String, u32)> = Vec::new();
     let mut mentioned: BTreeSet<String> = BTreeSet::new();
     // The lane's repo, the base and the gate (design §1.1): a task keeps the
     // ones it was created with. The config is read once for the whole apply.
@@ -1045,6 +1082,9 @@ fn apply_queue(
                     updated: now,
                 };
                 tx.insert_task(&task)?;
+                if let Some(estimate) = item.estimate {
+                    estimate_changes.push((id.clone(), estimate));
+                }
                 if let Some(work) = member {
                     tx.set_task_feature(project, &id, &work.feature)?;
                 }
@@ -1177,6 +1217,9 @@ fn apply_queue(
                 // The planned time (T-38): the draft may change it; a draft
                 // that says nothing keeps the estimate the task has.
                 if let Some(estimate) = item.estimate {
+                    if task.estimate_min != Some(i64::from(estimate)) {
+                        estimate_changes.push((id.clone(), estimate));
+                    }
                     task.estimate_min = Some(i64::from(estimate));
                 }
                 // The GitHub issue (T-79): a draft that names one sets it; a
@@ -2012,6 +2055,23 @@ fn apply_queue(
         warnings.push(warning);
     }
 
+    // M7.3: an estimate far from the measured speed of the lane's model is
+    // named, never refused.
+    if let Some(config) = &config {
+        if !estimate_changes.is_empty() {
+            let speeds = crate::speed::measured(tx, now)?;
+            for (id, estimate) in estimate_changes {
+                if let Some(warning) =
+                    estimate_warning(tx, config, project, &speeds, &id, estimate)?
+                {
+                    if !warnings.contains(&warning) {
+                        warnings.push(warning);
+                    }
+                }
+            }
+        }
+    }
+
     tx.insert_plan(&PlanRow {
         project: project.to_string(),
         version,
@@ -2025,6 +2085,7 @@ fn apply_queue(
         version,
         warnings,
         created,
+        labels: labels.into_iter().collect(),
         contract_changed,
         not_mentioned,
         settled,
@@ -2490,17 +2551,81 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
         if !object_held(&repo.path, &config.conventions.remote, candidate) {
             continue;
         }
-        if !crate::base::contains(std::path::Path::new(&repo.path), candidate, &reference)? {
-            return Err(bad(
-                0,
-                format!(
-                    "{task}: the candidate {candidate} is not in {}: a pass may name the task whose merge landed the work only when that work is in the integration branch",
-                    repo.integration
-                ),
-            ));
+        let dir = std::path::Path::new(&repo.path);
+        let landed = crate::base::landed_in(dir, &reference, candidate).map_err(|e| bad(0, e))?;
+        if !landed {
+            // M7.3: an integrated-by pass whose candidate differs from the
+            // integration branch only in the voyage's records is accepted —
+            // the records are the captain's own files, and the work landed.
+            let changed = changed_between(dir, &reference, candidate).map_err(|e| bad(0, e))?;
+            // A candidate that differs in nothing is not the work that landed
+            // (T-205 F4: the same tree with no ancestry is refused); one that
+            // differs only in the voyage's records is.
+            let only_voyage = !changed.is_empty()
+                && changed
+                    .iter()
+                    .all(|path| under_voyage(path, &repo.voyage_dir, &project));
+            if !only_voyage {
+                return Err(bad(
+                    0,
+                    format!(
+                        "{task}: the candidate {candidate} is not in {}: a pass may name the task whose merge landed the work only when that work is in the integration branch",
+                        repo.integration
+                    ),
+                ));
+            }
         }
     }
     Ok(())
+}
+
+/// The paths `git diff --name-only <reference> <candidate>` lists in `dir`.
+fn changed_between(
+    dir: &std::path::Path,
+    reference: &str,
+    candidate: &str,
+) -> Result<Vec<String>, String> {
+    let diffed = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["diff", "--name-only", reference, candidate])
+        .output()
+        .map_err(|error| {
+            format!(
+                "cannot diff {candidate} against {reference} in {}: {error}",
+                dir.display()
+            )
+        })?;
+    if !diffed.status.success() {
+        return Err(format!(
+            "cannot diff {candidate} against {reference} in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&diffed.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&diffed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Whether `path` lies under the project's voyage folder: `voyage_dir` with
+/// `{project}` filled in, `{milestone}` matching any one folder.
+fn under_voyage(path: &str, voyage_dir: &str, project: &str) -> bool {
+    let template = voyage_dir.replace("{project}", project);
+    let Some(at) = template.find("{milestone}") else {
+        return false;
+    };
+    let prefix = &template[..at];
+    let Some(rest) = path.strip_prefix(prefix) else {
+        return false;
+    };
+    let Some((milestone, _)) = rest.split_once('/') else {
+        return false;
+    };
+    !milestone.is_empty()
 }
 
 /// A done line's commit must be on the integration or the release branch
@@ -2797,31 +2922,9 @@ fn on_integration(
             ),
         ));
     }
-    let placed = Command::new("git")
-        .args(["merge-base", "--is-ancestor", candidate, &reference])
-        .current_dir(&repo.path)
-        .output()
-        .map_err(|e| {
-            bad(
-                0,
-                format!(
-                    "cannot place {candidate} against {reference} in {}: {e}",
-                    repo.path
-                ),
-            )
-        })?;
-    match placed.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(bad(
-            0,
-            format!(
-                "cannot place {candidate} against {reference} in {}: {}",
-                repo.path,
-                String::from_utf8_lossy(&placed.stderr).trim()
-            ),
-        )),
-    }
+    let placed = crate::base::landed_in(std::path::Path::new(&repo.path), &reference, candidate)
+        .map_err(|error| bad(0, error))?;
+    Ok(placed)
 }
 
 /// Close the open merge items of a task (T-112: a cancelled task; T-92 F1: a
@@ -3729,10 +3832,11 @@ fn restart_seat(tx: &Tx<'_>, project: &str, name: &str, line: usize, now: Ts) ->
             }
         }
     }
-    // The engine's restart step reads this flag; it waits for a working
-    // reviewer's verdict before it acts.
+    // The engine's restart step reads this request; it waits for a working
+    // reviewer's verdict before it acts. Its own key (T-709): the plan under
+    // `engine.restart.<seat>` is not overwritten by a request.
     tx.set_meta(
-        &format!("engine.restart.{seat_id}"),
+        &format!("engine.restart-request.{seat_id}"),
         &serde_json::json!({ "at": now }).to_string(),
     )?;
     Ok(())
@@ -3749,6 +3853,138 @@ fn project_config(tx: &Tx<'_>, project: &str) -> GearResult<Option<crate::config
         return Ok(None);
     }
     Ok(Some(crate::config::parse(&row.config_toml)?))
+}
+
+/// The model a task's lane runs (M7.3): the lane's first `models` entry in the
+/// config (its own override, else the role chain), else the seat's
+/// `engine.model.<seat>`; a captain's task: the captain seat's model, else the
+/// captain chain's first entry.
+fn model_of_task(
+    tx: &Tx<'_>,
+    config: &crate::config::ProjectConfig,
+    project: &str,
+    task: &TaskRow,
+) -> GearResult<Option<String>> {
+    match task.lane.as_deref() {
+        Some(lane) => {
+            if let Some(section) = config.lanes.iter().find(|section| section.name == lane) {
+                if let Some(entry) = section.models.first() {
+                    return Ok(Some(entry.model().to_string()));
+                }
+            }
+            if let Some(entry) = config.models.lanes.first() {
+                return Ok(Some(entry.model().to_string()));
+            }
+            let seat = format!("{project}:{lane}");
+            Ok(tx
+                .get_meta(&format!("engine.model.{seat}"))?
+                .filter(|model| !model.is_empty()))
+        }
+        None => {
+            let seat = tx
+                .captain_of(project)?
+                .map(|seat| seat.id)
+                .unwrap_or_else(|| format!("{project}:captain"));
+            if let Some(model) = tx
+                .get_meta(&format!("engine.model.{seat}"))?
+                .filter(|model| !model.is_empty())
+            {
+                return Ok(Some(model));
+            }
+            Ok(config
+                .models
+                .captain
+                .first()
+                .map(|entry| entry.model().to_string()))
+        }
+    }
+}
+
+/// The warning for an estimate far from the measured speed of its lane's model
+/// (M7.3): more than twice the calibrated minutes, or less than half of them.
+fn estimate_warning(
+    tx: &Tx<'_>,
+    config: &crate::config::ProjectConfig,
+    project: &str,
+    speeds: &[crate::speed::ModelSpeed],
+    task: &str,
+    estimate: u32,
+) -> GearResult<Option<String>> {
+    let Some(row) = tx.get_task(project, task)? else {
+        return Ok(None);
+    };
+    let Some(model) = model_of_task(tx, config, project, &row)? else {
+        return Ok(None);
+    };
+    let Some(calibrated) = crate::speed::calibrated(speeds, &model, estimate) else {
+        return Ok(None);
+    };
+    let Some(speed) = speeds.iter().find(|speed| speed.model == model) else {
+        return Ok(None);
+    };
+    // Far from the measured speed: more than twice the model's median work
+    // time, or less than half of it. (The calibrated value is the estimate
+    // scaled to that speed, so comparing the estimate with it would be
+    // tautological; the measured work is what the estimate is far from.)
+    let median = speed.median_work_min;
+    if estimate <= median.saturating_mul(2) && estimate.saturating_mul(2) >= median {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{task}: estimate {estimate} min; {model} has taken {}x its estimates over {} tasks (median {} min of work): about {calibrated} min",
+        speed.median_ratio, speed.samples, speed.median_work_min
+    )))
+}
+
+/// The eta line of a departing apply (M7.3): the measured speed of the lanes'
+/// models against the voyage's eta, on its slowest lane. `departing` are the
+/// voyages this apply departs; a confirmed apply on a voyage that already
+/// departed uses the current voyage.
+fn speed_eta_line(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &Draft,
+    departing: &BTreeSet<String>,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    let milestone = match departing.iter().next() {
+        Some(milestone) => milestone.clone(),
+        None if draft.confirmed => current_voyage(tx, project)?,
+        None => return Ok(None),
+    };
+    if milestone.is_empty() {
+        return Ok(None);
+    }
+    let Some(voyage) = tx.get_voyage(project, &milestone)? else {
+        return Ok(None);
+    };
+    let Some(eta) = voyage.eta.clone().filter(|eta| !eta.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(config) = project_config(tx, project)? else {
+        return Ok(None);
+    };
+    let speeds = crate::speed::measured(tx, now)?;
+    let mut per_lane: BTreeMap<String, u32> = BTreeMap::new();
+    for task in tx.tasks_of_project(project)? {
+        if task.milestone.as_deref() != Some(milestone.as_str()) || task.state.is_terminal() {
+            continue;
+        }
+        let estimate = task.estimate_min.unwrap_or(0).max(0) as u32;
+        let minutes = match model_of_task(tx, &config, project, &task)? {
+            Some(model) => crate::speed::calibrated(&speeds, &model, estimate).unwrap_or(estimate),
+            None => estimate,
+        };
+        let lane = task.lane.clone().unwrap_or_else(|| "captain".to_string());
+        *per_lane.entry(lane).or_default() += minutes;
+    }
+    let Some(slowest) = per_lane.values().max().copied() else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
+        "eta {eta}; the measured speed of the lanes' models puts the open tasks at about {} on the slowest lane",
+        crate::time::hours(i64::from(slowest) * 60)
+    )))
 }
 
 /// The key the captain's `- merge-first T-<n>` writes (T-574): the task whose
@@ -4331,6 +4567,254 @@ mod tests {
         let draft = parse(text).unwrap();
         let (env, fp) = cap();
         apply(s, &env, Some(&fp), None, &draft, text, rid, NOW)
+    }
+
+    // ---- M7.3: estimates against the measured speed ---------------------
+
+    const SPEED_CONFIG: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+models = ["m"]
+
+[conventions]
+integration = "dev"
+gate = "true"
+"#;
+
+    /// A project whose lane `heat` runs model `m`, with `attempts` measured
+    /// attempts of it: 15 minutes of work against a 75 minute estimate (ratio
+    /// 0.2).
+    fn speed_world(attempts: usize) -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            let mut project = testing::seed_project(tx, "p", "sess", NOW)?;
+            project.config_toml = SPEED_CONFIG.to_string();
+            tx.update_project(&project)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                NOW,
+            )?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+            for i in 0..attempts {
+                let id = format!("T-{}", 90 + i);
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.clone(),
+                    rank: 100 + i as i64,
+                    state: TaskState::Done,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(75),
+                    issue: None,
+                    updated: NOW,
+                })?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: id.clone(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Accepted,
+                    candidate: Some("c".into()),
+                    report: None,
+                    safe_point: None,
+                    started: NOW - 86_400,
+                    updated: NOW - 86_400,
+                })?;
+                tx.set_attempt_time("p", &id, 1, gear_store::AttemptStep::Started, NOW - 86_400)?;
+                tx.set_attempt_time(
+                    "p",
+                    &id,
+                    1,
+                    gear_store::AttemptStep::HandedIn,
+                    NOW - 86_400 + 15 * 60,
+                )?;
+                tx.set_meta(&crate::tasks::attempt_model_key("p", &id, 1), "m")?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn run_confirmed(s: &mut Store, text: &str, rid: &str) -> GearResult<ApplyResult> {
+        let mut draft = parse(text).unwrap();
+        draft.confirmed = true;
+        draft.decisions.push(
+            "2026-10-27 10:05 confirmed: the voyage departs | why: the user said depart"
+                .to_string(),
+        );
+        let (env, fp) = cap();
+        apply(s, &env, Some(&fp), None, &draft, text, rid, NOW)
+    }
+
+    #[test]
+    fn a_new_block_may_depend_on_another_by_label() {
+        let mut s = world();
+        let text = draft_text(
+            0,
+            "## NEW:core [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: NEW:core\n",
+        );
+        let r = run(&mut s, &text, "r1").unwrap();
+        assert_eq!(r.created.len(), 2, "{:?}", r.created);
+        assert_eq!(
+            r.labels,
+            vec![("core".to_string(), r.created[0].clone())],
+            "{:?}",
+            r.labels
+        );
+        let second = s
+            .read(|tx| tx.get_task("p", &r.created[1]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.deps, vec![r.created[0].clone()]);
+        let rewritten = crate::draft::rewrite_applied(
+            &text,
+            r.version,
+            &r.created,
+            &[],
+            &r.labels,
+            &r.milestone_blocks,
+        );
+        assert!(
+            rewritten.contains(&format!("## {} [must] lane=heat", r.created[0])),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains(&format!("## {} [must] lane=heat", r.created[1])),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains(&format!("deps: {}", r.created[0])),
+            "{rewritten}"
+        );
+        assert!(!rewritten.contains("NEW"), "{rewritten}");
+    }
+
+    #[test]
+    fn a_dep_on_an_unknown_label_is_refused() {
+        let mut s = world();
+        let err = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: NEW:core\n",
+            ),
+            "r1",
+        )
+        .unwrap_err();
+        assert!(
+            err.detail
+                .contains("dep NEW:core names no block of this draft"),
+            "{}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn an_estimate_far_from_the_measured_speed_is_named() {
+        let mut s = speed_world(5);
+        let r = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        assert_eq!(
+            r.warnings[0],
+            "T-1: estimate 60 min; m has taken 0.2x its estimates over 5 tasks (median 15 min of work): about 12 min"
+        );
+    }
+
+    #[test]
+    fn an_estimate_within_the_measured_speed_is_not_named() {
+        let mut s = speed_world(5);
+        let r = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 15\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn under_five_samples_no_estimate_is_named() {
+        let mut s = speed_world(4);
+        let r = run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn a_departing_apply_names_the_eta_against_the_measured_speed() {
+        let mut s = speed_world(5);
+        let text = format!(
+            "<!-- gear-plan project=p base=0 -->\n# Milestone M1: the voyage\ndone: it ships\nbar: stable\neta: 8h\ndepart: now\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n"
+        );
+        let r = run_confirmed(&mut s, &text, "r1").unwrap();
+        assert!(
+            r.warnings.iter().any(|warning| warning
+                == "eta 8h; the measured speed of the lanes' models puts the open tasks at about 0h12m on the slowest lane"),
+            "{:?}",
+            r.warnings
+        );
     }
 
     /// T-563: a task on a lane nobody works is named after the apply, one line
@@ -6875,5 +7359,107 @@ mod tail_time_tests {
             Some(1793037600 - 3600)
         );
         assert_eq!(parse_rfc3339("tomorrow"), None);
+    }
+}
+
+#[cfg(test)]
+mod integration_check_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// M7.3: a candidate landed by a squash is on the integration branch
+    /// through the `Gear-Candidate` trailer, though its own sha is no
+    /// ancestor; an unrelated commit is not.
+    #[test]
+    fn a_squashed_candidate_is_on_the_integration_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        git(
+            root.path(),
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        );
+        git(
+            root.path(),
+            &["init", "-q", "-b", "dev", work.to_str().unwrap()],
+        );
+        std::fs::write(work.join("base.txt"), "base\n").unwrap();
+        git(&work, &["add", "base.txt"]);
+        git(&work, &["commit", "-q", "-m", "base"]);
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&work, &["push", "-q", "origin", "dev"]);
+        // The candidate on a branch of its own.
+        git(&work, &["checkout", "-q", "-b", "side"]);
+        std::fs::create_dir_all(work.join("src/heat")).unwrap();
+        std::fs::write(work.join("src/heat/x.rs"), "the work\n").unwrap();
+        git(&work, &["add", "src/heat/x.rs"]);
+        git(&work, &["commit", "-q", "-m", "the work"]);
+        let candidate = git(&work, &["rev-parse", "HEAD"]);
+        // The squash on dev names it.
+        git(&work, &["checkout", "-q", "dev"]);
+        git(
+            &work,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                &format!("T-1: the goal\n\nGear-Candidate: {candidate}"),
+            ],
+        );
+        git(&work, &["push", "-q", "origin", "dev"]);
+        let config = crate::config::parse(&format!(
+            r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "{}"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[conventions]
+integration = "dev"
+gate = "make test"
+"#,
+            work.display()
+        ))
+        .unwrap();
+        assert_eq!(on_integration(&config, Some("heat"), &candidate), Ok(true));
+        assert_eq!(on_integration(&config, Some("heat"), "deadbeef"), Ok(false));
     }
 }

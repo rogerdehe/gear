@@ -444,7 +444,7 @@ pub fn reclaim(
             if handled.contains(&branch.name) || upcoming(&branch.name) {
                 continue;
             }
-            if branch_on_integration(&repo.path, &config, &branch.tip) {
+            if branch_on_integration(&repo.path, &config, &repo.integration, &branch.tip) {
                 if let Err(reason) =
                     delete_remote_branch(&repo.path, &config.conventions.remote, &branch.name)
                 {
@@ -470,10 +470,10 @@ pub fn reclaim(
             && repo.integration != config.conventions.staging
             && repo.integration.starts_with(&format!("{project}/"))
         {
-            if let Some(tip) =
-                remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
+            if remote_branch_tip(&repo.path, &config.conventions.remote, &repo.integration)
+                .is_some()
             {
-                if branch_on_release(&repo.path, &config, &tip, &repo.release) {
+                if branch_on_release(&repo.path, &config, &repo.release, &repo.integration) {
                     let _ = delete_remote_branch(
                         &repo.path,
                         &config.conventions.remote,
@@ -734,8 +734,31 @@ fn merge_records(
             resolve_records(store, project, milestone, &reason, now)
         }
         Recorded::Missing => {
-            let reason = format!("there is no branch {branch} on the remote");
-            resolve_records(store, project, milestone, &reason, now)
+            // T-710: a seat branch the remote does not have is often a pinned
+            // voyage (Lawrence M2: the captain pushed `lawrence/captain/M1`
+            // while the landing asked for `lawrence/captain/M2`). Name the
+            // captain branches the remote does have, so the captain can push
+            // the records where the landing looks.
+            let branches = remote_captain_branches(&dir, &config.conventions.remote, project);
+            if branches.is_empty() {
+                let reason = format!("there is no branch {branch} on the remote");
+                resolve_records(store, project, milestone, &reason, now)
+            } else {
+                let error = format!(
+                    "no branch {branch} on {}; the remote has {}: push this voyage's records to {branch}",
+                    config.conventions.remote,
+                    branches.join(", ")
+                );
+                tell_records_failed(
+                    store,
+                    project,
+                    milestone,
+                    &branch,
+                    &repo.integration,
+                    &error,
+                    now,
+                )
+            }
         }
         Recorded::Busy => Ok(None),
         Recorded::Failed(error) => tell_records_failed(
@@ -748,6 +771,27 @@ fn merge_records(
             now,
         ),
     }
+}
+
+/// The remote's `<project>/captain/*` branches, the `<remote>/` prefix cut
+/// (T-710).
+fn remote_captain_branches(dir: &Path, remote: &str, project: &str) -> Vec<String> {
+    let Ok(out) = merge::git(
+        dir,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            &format!("refs/remotes/{remote}/{project}/captain/"),
+        ],
+    ) else {
+        return Vec::new();
+    };
+    let prefix = format!("{remote}/");
+    out.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_prefix(&prefix).unwrap_or(line).to_string())
+        .collect()
 }
 
 /// The git half of [`merge_records`]: fetch (done by the caller), compare,
@@ -817,6 +861,34 @@ fn records_step(
         delete_records_branch(&dir, &remote, branch);
         return Ok(Recorded::Empty);
     }
+    // T-699: the records branch carries the voyage's records and nothing else.
+    // A file outside the voyage folder is the captain's work, which belongs to
+    // a task: refuse before anything is merged or deleted.
+    let voyage = gear_model::layout::voyage_dir(&repo.voyage_dir, project, milestone);
+    let changed = match merge::git(
+        &dir,
+        &[
+            "diff",
+            "--name-only",
+            &format!("{remote}/{}...{theirs}", repo.integration),
+        ],
+    ) {
+        Ok(paths) => paths,
+        Err(error) => return Ok(Recorded::Failed(error)),
+    };
+    let outside: Vec<&str> = changed
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter(|path| !path.starts_with(&format!("{voyage}/")))
+        .collect();
+    if !outside.is_empty() {
+        let named: Vec<&str> = outside.iter().take(10).copied().collect();
+        return Ok(Recorded::Failed(format!(
+            "the captain's branch changes files outside {voyage}: {}; move them to a task",
+            named.join(", ")
+        )));
+    }
     let worktree = match merge::open_integration_worktree(store, herdr, repo, project, config, now)
     {
         Ok(worktree) => worktree,
@@ -859,6 +931,19 @@ fn records_step(
         let _ = git(&["merge", "--abort"]);
         let _ = git(&["reset", "--hard", &base]);
         return Ok(Recorded::Failed(error));
+    }
+    // T-699: in squash mode the records land as one commit on the integration
+    // tip, never a merge commit: the merge above staged the branch's content,
+    // the soft reset moves the tip back under it, and the commit lands it.
+    if repo.merge_method == gear_app::config::MergeMethod::Squash {
+        if let Err(error) = git(&["reset", "--soft", &base]) {
+            let _ = git(&["reset", "--hard", &base]);
+            return Ok(Recorded::Failed(error));
+        }
+        if let Err(error) = git(&["commit", "-m", &message]) {
+            let _ = git(&["reset", "--hard", &base]);
+            return Ok(Recorded::Failed(error));
+        }
     }
     if let Err(error) = git(&[
         "push",
@@ -1062,15 +1147,12 @@ fn remove_worktree(repo: &str, worktree: &ProjectWorktree) -> Result<(), String>
     Ok(())
 }
 
-/// Whether the branch's tip is on the integration branch.
-fn branch_on_integration(repo: &str, config: &ProjectConfig, tip: &str) -> bool {
+/// Whether the branch's tip is on the integration branch (M7.3): by ancestry,
+/// or through the `Gear-Candidate`/`Gear-Source` trailer of a squash commit.
+fn branch_on_integration(repo: &str, config: &ProjectConfig, integration: &str, tip: &str) -> bool {
     let remote = &config.conventions.remote;
-    let integration = format!("{remote}/{}", config.conventions.integration);
-    merge::git(
-        Path::new(repo),
-        &["merge-base", "--is-ancestor", tip, &integration],
-    )
-    .is_ok()
+    let integration = format!("{remote}/{integration}");
+    gear_app::base::landed_in(Path::new(repo), &integration, tip).unwrap_or(false)
 }
 
 /// The tip of a branch on the remote, if it is there (T-622).
@@ -1095,19 +1177,17 @@ fn remote_branch_tip(repo: &str, remote: &str, branch: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether the branch's tip is on the release branch (T-622).
-fn branch_on_release(repo: &str, config: &ProjectConfig, tip: &str, release: &str) -> bool {
+/// Whether the integration branch adds nothing to the release branch (T-622,
+/// M7.3): it is an ancestor of it, or its content is already there — a squash
+/// landed the same tree.
+fn branch_on_release(repo: &str, config: &ProjectConfig, release: &str, integration: &str) -> bool {
     let remote = &config.conventions.remote;
-    merge::git(
+    gear_app::base::adds_nothing(
         Path::new(repo),
-        &[
-            "merge-base",
-            "--is-ancestor",
-            tip,
-            &format!("{remote}/{release}"),
-        ],
+        &format!("{remote}/{release}"),
+        &format!("{remote}/{integration}"),
     )
-    .is_ok()
+    .unwrap_or(false)
 }
 
 /// Delete a branch on the remote.
@@ -1254,6 +1334,9 @@ mod tests {
         origin: PathBuf,
         store: Store,
         herdr: gear_herdr::fake::FakeHerdr,
+        /// What the stub `herdr workspace list` answers: (id, label, agent
+        /// status). Empty by default.
+        workspaces: Vec<(String, String, String)>,
     }
 
     const CAP: &str = "p/captain/M1";
@@ -1285,6 +1368,10 @@ profile = "pi"
 [conventions]
 integration = "dev"
 gate = "true"
+# The fixture names its own voyage folder and keeps today's merge commits;
+# the squash is tested on its own.
+voyage_dir = "voyages/{{milestone}}"
+merge_method = "merge"
 "#,
             repo.display()
         )
@@ -1423,6 +1510,7 @@ gate = "true"
                 origin,
                 store,
                 herdr,
+                workspaces: Vec::new(),
             }
         }
 
@@ -1444,11 +1532,45 @@ gate = "true"
             sh(
                 &self.work,
                 &format!(
-                    "git checkout -q {CAP} && echo records > README.md && git commit -q -am 'records of M1' && \
+                    "git checkout -q {CAP} && mkdir -p voyages/M1 && echo records > voyages/M1/report.md && \
+                     git add -A && git commit -q -m 'records of M1' && \
                      git push -q origin {CAP} && git checkout -q dev && \
-                     echo later > README.md && git commit -q -am 'later on dev' && git push -q origin dev"
+                     mkdir -p voyages/M1 && echo later > voyages/M1/report.md && \
+                     git add -A && git commit -q -m 'later on dev' && git push -q origin dev"
                 ),
             );
+        }
+
+        /// The project's config with `integration` set to `branch`.
+        fn set_integration(&mut self, branch: &str) {
+            let text = config_text(&self.work).replace(
+                "integration = \"dev\"",
+                &format!("integration = \"{branch}\""),
+            );
+            self.store
+                .write(|tx| {
+                    let mut project = tx.get_project("p")?.unwrap();
+                    project.config_toml = text;
+                    tx.update_project(&project)?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        /// The project's config with `merge_method` set to `method`.
+        fn use_merge_method(&mut self, method: &str) {
+            let text = config_text(&self.work).replace(
+                "merge_method = \"merge\"",
+                &format!("merge_method = \"{method}\""),
+            );
+            self.store
+                .write(|tx| {
+                    let mut project = tx.get_project("p")?.unwrap();
+                    project.config_toml = text;
+                    tx.update_project(&project)?;
+                    Ok(())
+                })
+                .unwrap();
         }
 
         /// An accepted attempt of the voyage's only task: handed in and judged,
@@ -1514,8 +1636,50 @@ gate = "true"
                 .unwrap()
         }
 
+        /// The workspaces the stub `herdr workspace list` answers with.
+        fn set_workspaces(&mut self, workspaces: &[(&str, &str, &str)]) {
+            self.workspaces = workspaces
+                .iter()
+                .map(|(id, label, status)| (id.to_string(), label.to_string(), status.to_string()))
+                .collect();
+        }
+
+        /// Run the reclaim with a `herdr` on PATH that answers `workspace
+        /// list` with this fixture's workspaces. The finished tests run in
+        /// parallel in one process, so PATH is process-wide: the call holds a
+        /// lock and restores it, and each fixture writes its own stub (T-706:
+        /// a test saw another's `p-captain-m2` and named it).
         fn reclaim(&mut self, now: Ts) -> Option<&'static str> {
-            reclaim(&mut self.store, &mut self.herdr, "p", now).unwrap()
+            static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let bin = self.root.path().join("bin-herdr");
+            std::fs::create_dir_all(&bin).unwrap();
+            let list: Vec<serde_json::Value> = self
+                .workspaces
+                .iter()
+                .map(|(id, label, status)| {
+                    serde_json::json!({
+                        "workspace_id": id,
+                        "label": label,
+                        "agent_status": status,
+                    })
+                })
+                .collect();
+            let json = serde_json::json!({"result": {"workspaces": list}}).to_string();
+            let script = bin.join("herdr");
+            std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let old = std::env::var_os("PATH").unwrap_or_default();
+            std::env::set_var(
+                "PATH",
+                format!("{}:{}", bin.display(), old.to_string_lossy()),
+            );
+            let out = reclaim(&mut self.store, &mut self.herdr, "p", now).unwrap();
+            std::env::set_var("PATH", old);
+            out
         }
 
         /// The records step alone, without the reclaim's worktree removal.
@@ -1609,6 +1773,84 @@ gate = "true"
         assert!(
             landed.items(&records_thread("M1")).is_empty(),
             "nothing to tell the captain"
+        );
+    }
+
+    /// T-699: the records branch carries the voyage's records only. A code
+    /// file is refused before anything is merged or deleted, and the item
+    /// names it.
+    #[test]
+    fn a_records_branch_changing_a_code_file_is_refused() {
+        let mut landed = Landed::new("outside");
+        landed.records("src/main.rs", "fn main() {}");
+
+        landed.reclaim(NOW + 600);
+
+        let items = landed.items(&records_thread("M1"));
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Open, "{items:?}");
+        let body = &items[0].body;
+        assert!(body.contains("src/main.rs"), "the file is named: {body}");
+        assert!(
+            body.contains("outside voyages/M1"),
+            "the voyage folder is named: {body}"
+        );
+        assert!(
+            body.contains("move them to a task"),
+            "the captain is told what to do: {body}"
+        );
+        assert!(
+            landed.origin_branches().contains(CAP),
+            "nothing is deleted: {}",
+            landed.origin_branches()
+        );
+        assert!(landed.local_branch(CAP), "not even locally");
+        assert!(
+            !landed.dev_log().contains("records: p M1"),
+            "nothing landed: {}",
+            landed.dev_log()
+        );
+        assert_eq!(landed.meta(&records_key("p", "M1")), None);
+    }
+
+    /// T-699: in squash mode the records land as one commit on the integration
+    /// tip, never a merge commit.
+    #[test]
+    fn a_squashed_records_landing_is_one_commit() {
+        let mut landed = Landed::new("squash");
+        landed.records("voyages/M1/report.md", "the voyage report");
+        landed.use_merge_method("squash");
+
+        landed.reclaim(NOW + 600);
+
+        let log = landed.dev_log();
+        assert_eq!(log.lines().next(), Some("records: p M1"), "{log}");
+        let parents = sh(
+            &landed.root.path(),
+            &format!(
+                "git -C {} rev-list --parents -n 1 dev",
+                landed.origin.display()
+            ),
+        );
+        assert_eq!(
+            parents.split_whitespace().count(),
+            2,
+            "one parent: no merge commit ({parents})"
+        );
+        assert_eq!(
+            sh(
+                &landed.root.path(),
+                &format!(
+                    "git -C {} show dev:voyages/M1/report.md",
+                    landed.origin.display()
+                )
+            ),
+            "the voyage report"
+        );
+        assert!(
+            !landed.origin_branches().contains(CAP),
+            "the branch is gone: {}",
+            landed.origin_branches()
         );
     }
 
@@ -1869,6 +2111,59 @@ gate = "true"
         assert_eq!(landed.meta(&records_key("p", "M1")), None);
     }
 
+    /// T-710: a landing whose seat branch is missing names the captain
+    /// branches the remote does have, and merges nothing.
+    #[test]
+    fn a_missing_seat_branch_names_the_captain_branches_the_remote_has() {
+        let mut landed = Landed::new("missing-seat");
+        sh(
+            &landed.root.path(),
+            &format!("git -C {} branch -D {CAP}", landed.origin.display()),
+        );
+        sh(
+            &landed.root.path(),
+            &format!("git -C {} branch p/captain/M0 dev", landed.origin.display()),
+        );
+
+        landed.reclaim(NOW + 600);
+
+        let items = landed.items(&records_thread("M1"));
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].state, MsgState::Open, "{items:?}");
+        assert!(items[0].urgent, "{items:?}");
+        let body = &items[0].body;
+        assert!(body.contains("no branch p/captain/M1 on origin"), "{body}");
+        assert!(body.contains("p/captain/M0"), "the branch is named: {body}");
+        assert!(
+            body.contains("push this voyage's records to p/captain/M1"),
+            "{body}"
+        );
+        assert!(
+            !landed.dev_log().contains("records: p M1"),
+            "nothing is merged: {}",
+            landed.dev_log()
+        );
+    }
+
+    /// T-710: with no captain branch at all the landing resolves as before.
+    #[test]
+    fn a_landing_with_no_captain_branch_at_all_resolves_as_before() {
+        let mut landed = Landed::new("no-captain");
+        sh(
+            &landed.root.path(),
+            &format!("git -C {} branch -D {CAP}", landed.origin.display()),
+        );
+
+        landed.reclaim(NOW + 600);
+
+        assert!(
+            landed.items(&records_thread("M1")).is_empty(),
+            "{:?}",
+            landed.items(&records_thread("M1"))
+        );
+        assert!(!landed.dev_log().contains("records: p M1"));
+    }
+
     /// T-585: a branch the integration branch already holds is only deleted.
     #[test]
     fn a_records_branch_already_on_the_integration_branch_is_only_deleted() {
@@ -2004,8 +2299,9 @@ gate = "true"
         sh(
             &landed.work,
             &format!(
-                "git checkout -q -b {CAP} dev && echo more > more.txt && git add more.txt && \
-                 git commit -q -m 'more records' && git push -q origin {CAP} && git checkout -q dev"
+                "git checkout -q -b {CAP} origin/dev && echo more > voyages/M1/plan.md && \
+                 git add voyages/M1/plan.md && git commit -q -m 'more records' && \
+                 git push -q origin {CAP} && git checkout -q dev"
             ),
         );
         let second_tip = sh(
@@ -2188,6 +2484,151 @@ gate = "true"
         );
     }
 
+    /// M7.3: a leftover task branch whose work was squashed onto the
+    /// integration branch counts as on it — the squash commit names it by
+    /// `Gear-Candidate` — and is deleted.
+    #[test]
+    fn a_task_branch_squashed_onto_the_integration_branch_is_deleted() {
+        let mut landed = Landed::new("squashed-branch");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/hull/t9 dev && echo work > work.txt && git add work.txt && \
+             git commit -q -m 'the work' && git push -q origin p/hull/t9 && git checkout -q dev",
+        );
+        let sha = sh(
+            &landed.root.path(),
+            &format!("git -C {} rev-parse p/hull/t9", landed.origin.display()),
+        );
+        sh(
+            &landed.work,
+            &format!(
+                "git commit -q --allow-empty -m 'T-9: the goal\n\nGear-Candidate: {sha}' && \
+                 git push -q origin dev"
+            ),
+        );
+
+        landed.reclaim(NOW + 600);
+
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.lines().any(|branch| branch == "p/hull/t9"),
+            "the squashed branch is deleted: {branches}"
+        );
+    }
+
+    /// M7.3: an integration branch squashed onto the release branch by a pull
+    /// request adds nothing to it, so the reclaim deletes it like one merged.
+    #[test]
+    fn an_integration_branch_squashed_onto_release_is_deleted() {
+        let mut landed = Landed::new("squashed-integration");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/dev dev && echo work > work.txt && git add work.txt && \
+             git commit -q -m 'the work' && git push -q origin p/dev",
+        );
+        // The same content reaches main by a squash (a pull request).
+        sh(
+            &landed.work,
+            "git checkout -q main && git merge -q --squash p/dev && git commit -q -m 'the work' && \
+             git push -q origin main",
+        );
+        landed.set_integration("p/dev");
+
+        landed.reclaim(NOW + 600);
+
+        let branches = landed.origin_branches();
+        assert!(
+            !branches.lines().any(|branch| branch == "p/dev"),
+            "the integration branch whose content is on main is deleted: {branches}"
+        );
+    }
+
+    /// M7.3: an integration branch with a code change of its own is kept and
+    /// not named — the reclaim names no unreleased integration branch since
+    /// T-622 (M-8935).
+    #[test]
+    fn an_integration_branch_with_a_code_change_is_kept_and_not_named() {
+        let mut landed = Landed::new("integration-code");
+        sh(
+            &landed.work,
+            "git checkout -q -b p/dev dev && echo work > work.txt && git add work.txt && \
+             git commit -q -m 'the work' && git push -q origin p/dev",
+        );
+        landed.set_integration("p/dev");
+
+        landed.reclaim(NOW + 600);
+
+        assert!(
+            landed
+                .origin_branches()
+                .lines()
+                .any(|branch| branch == "p/dev"),
+            "the branch with unreleased work is kept"
+        );
+        assert!(
+            landed
+                .items(RECLAIM_THREAD)
+                .iter()
+                .all(|item| !item.body.contains("branch p/dev")),
+            "the integration branch is not named"
+        );
+    }
+
+    /// M7.3 F1: a `[[repos]]` entry's own integration branch is checked against
+    /// itself, never the project default: the child's branch holds unreleased
+    /// work and stays, though the project's `dev` is on main.
+    #[test]
+    fn a_child_repos_own_integration_branch_is_checked_against_itself() {
+        let mut landed = Landed::new("child-repo");
+        let child_origin = landed.root.path().join("child-origin.git");
+        let child = landed.work.join("child");
+        sh(
+            landed.root.path(),
+            &format!("git init -q --bare {}", child_origin.display()),
+        );
+        sh(
+            landed.root.path(),
+            &format!(
+                "git clone -q {} {}",
+                child_origin.display(),
+                child.display()
+            ),
+        );
+        sh(
+            &child,
+            "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m base && \
+             git push -q origin HEAD:refs/heads/main HEAD:refs/heads/dev && \
+             git checkout -q -b p/feature && echo work > work.txt && git add work.txt && \
+             git -c user.name=t -c user.email=t@t commit -q -m work && \
+             git push -q origin p/feature",
+        );
+        landed
+            .store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = format!(
+                    "{}\n\n[[repos]]\nname = \"api\"\npath = \"child\"\nintegration = \"p/feature\"\nrelease = \"main\"\ngate = \"true\"\n",
+                    config_text(&landed.work)
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
+
+        landed.reclaim(NOW + 600);
+
+        let branches = sh(
+            &landed.root.path(),
+            &format!(
+                "git -C {} for-each-ref --format='%(refname:short)' refs/heads",
+                child_origin.display()
+            ),
+        );
+        assert!(
+            branches.lines().any(|branch| branch == "p/feature"),
+            "the child's own integration branch with unreleased work is kept: {branches}"
+        );
+    }
+
     /// T-618: a branch whose tip is on the integration branch is deleted on
     /// the remote; one with extra commits is named.
     #[test]
@@ -2307,19 +2748,6 @@ gate = "true"
         );
     }
 
-    /// A `herdr` on PATH whose `workspace list` names one workspace of the
-    /// project: the reclaim reads the real command, the fake answers the
-    /// remove and the close.
-    fn stub_workspace_list(dir: &Path, workspace: &str, label: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let script = dir.join("herdr");
-        let json = format!(
-            r#"{{"result":{{"workspaces":[{{"workspace_id":"{workspace}","label":"{label}","agent_status":"unknown"}}]}}}}"#
-        );
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
     /// A worktree the reclaim leaves (uncommitted changes) keeps its
     /// workspace: closing that workspace would remove the worktree with Herdr
     /// (Lawrence M-2692).
@@ -2337,16 +2765,8 @@ gate = "true"
             ),
         );
         std::fs::write(home.join("gear.toml"), "x").unwrap();
-        let bin = landed.root.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        stub_workspace_list(&bin, "w1KM", "p-captain-m2");
-        let old = std::env::var_os("PATH").unwrap_or_default();
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", bin.display(), old.to_string_lossy()),
-        );
+        landed.set_workspaces(&[("w1KM", "p-captain-m2", "unknown")]);
         landed.reclaim(NOW + 600);
-        std::env::set_var("PATH", old);
 
         assert!(home.exists(), "the dirty worktree is kept");
         assert!(
@@ -2365,20 +2785,7 @@ gate = "true"
     #[test]
     fn a_leaving_agents_workspace_is_named_only_after_its_grace() {
         let mut landed = Landed::new("agents-leaving");
-        let bin = landed.root.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let script = bin.join("herdr");
-            let json = r#"{"result":{"workspaces":[{"workspace_id":"w1KM","label":"p-heat","agent_status":"idle"}]}}"#;
-            std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{json}'\n")).unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let old = std::env::var_os("PATH").unwrap_or_default();
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", bin.display(), old.to_string_lossy()),
-        );
+        landed.set_workspaces(&[("w1KM", "p-heat", "idle")]);
         let named = |landed: &mut Landed| {
             landed
                 .items(RECLAIM_THREAD)
@@ -2389,7 +2796,6 @@ gate = "true"
         let early = named(&mut landed);
         landed.reclaim(NOW + AGENTS_LEAVE_S + 60);
         let late = named(&mut landed);
-        std::env::set_var("PATH", old);
 
         assert!(!early, "an agent on its way out is not a leftover yet");
         assert!(late, "one still there after the grace is named");
@@ -2404,16 +2810,8 @@ gate = "true"
         // The fake knows no worktree of w1KM, so `worktree_remove` is refused;
         // the pane under the workspace lets `workspace_close` succeed.
         landed.herdr.add_shell("w1KM:p1");
-        let bin = landed.root.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        stub_workspace_list(&bin, "w1KM", "p-merge");
-        let old = std::env::var_os("PATH").unwrap_or_default();
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", bin.display(), old.to_string_lossy()),
-        );
+        landed.set_workspaces(&[("w1KM", "p-merge", "unknown")]);
         let changed = landed.reclaim(NOW + 600);
-        std::env::set_var("PATH", old);
 
         assert_eq!(changed, None, "nothing is left to name");
         assert!(

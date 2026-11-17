@@ -1354,7 +1354,8 @@ fn remove_scratch(store: &mut Store, project: &str, seat: &SeatRow) {
 /// a captain picks up a fixed account or a changed environment without losing
 /// the seat.
 ///
-/// The plan's apply writes `engine.restart.<seat>`; this step carries it out
+/// The plan's apply writes `engine.restart-request.<seat>` (T-709); this step
+/// carries it out
 /// across ticks, because an agent takes a moment to leave its pane. A working
 /// reviewer waits: the flag stays until its verdict put the seat back in
 /// `Standby` with no job, so the review in flight is never cut off.
@@ -1398,10 +1399,10 @@ pub fn restart_reviewers(
     Ok(restarted)
 }
 
-/// The key the plan's `- restart <reviewer>` writes: the seat whose agent is
-/// to be exited and started again.
+/// The key the plan's `- restart <reviewer>` writes (T-709): the seat whose
+/// agent is to be exited and started again.
 fn restart_key(seat: &str) -> String {
-    format!("engine.restart.{seat}")
+    format!("engine.restart-request.{seat}")
 }
 
 /// The phase of a restart across ticks: `exit` (the goodbye went out, the
@@ -4859,7 +4860,7 @@ profile = "codex"
                     "/fake-worktrees/p-review-1",
                 )?;
                 tx.set_meta(
-                    "engine.restart.p:review-1",
+                    "engine.restart-request.p:review-1",
                     &serde_json::json!({ "at": T0 }).to_string(),
                 )?;
                 Ok(seat)
@@ -4910,7 +4911,7 @@ profile = "codex"
         assert_eq!(start, ("w2:p1".to_string(), "codex".to_string()));
         assert_eq!(
             store
-                .read(|tx| tx.get_meta("engine.restart.p:review-1"))
+                .read(|tx| tx.get_meta("engine.restart-request.p:review-1"))
                 .unwrap()
                 .as_deref(),
             Some(""),
@@ -4932,7 +4933,7 @@ profile = "codex"
                     "/fake-worktrees/p-r-1",
                 )?;
                 tx.set_meta(
-                    "engine.restart.p:r-1",
+                    "engine.restart-request.p:r-1",
                     &serde_json::json!({ "at": T0 }).to_string(),
                 )
             })
