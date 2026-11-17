@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1306 -->
+<!-- gear-plan project=gear base=1308 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 5h
 depart: now
 
 # Decisions
+- station M-9036: keep course | why: 15 done at 112m, pace 0.25x, projected 133m from departure; hull on T-696 then T-693 rework and T-694, mast on its backlog tasks
 - station M-9009: keep course | why: 12 done at 97m, pace 0.25x, projected 118m from departure; both lanes busy
 - 2026-11-17 note: T-696's packet named a review.rs `on_integration` that does not exist (it is plan.rs's, done in T-697); the item is dropped from T-696. The CLI and skill go back to mast with T-700, T-704 and T-705, since mast ran dry and hull still holds T-693's rework and T-694 | why: M-8988 hull looped 55 min on the wrong name; M-8987 mast idle
 - station M-8986: keep course | why: 9 done at 82m, pace 0.26x, projected 109m from departure; both lanes busy
@@ -149,4 +150,10 @@ deps: -
 goal: A landing whose seat branch is missing names the captain branches the remote does have. In crates/gear-engine/src/finished.rs `merge_records`, the `Recorded::Missing` arm today resolves the records item with "there is no branch {branch} on the remote" (Lawrence M2: the seat branch was pinned `lawrence/captain/M2`, the captain pushed `lawrence/captain/M1`, and the records were never merged). List the remote's `<project>/captain/*` branches (`git for-each-ref --format=%(refname:short) refs/remotes/<remote>/<project>/captain/`, the `<remote>/` prefix cut). When there are any, open (or keep) the captain item on thread `records:<milestone>` through the existing `tell_records_failed` path with the text `no branch <branch> on <remote>; the remote has <list>: push this voyage's records to <branch>`, and do not resolve; when there are none, resolve as today.
 accept: tests: a landing whose seat branch is missing while `p/captain/M0` is on the remote gets one item naming `p/captain/M0` and nothing is merged; a landing with no captain branch at all resolves as before.
 estimate: 15
+deps: -
+
+## T-711 [should] lane=mast milestone=M7.3
+goal: A Claude lane or reviewer whose plan limit is spent is seen as out of quota. In crates/gear-engine/src/quota.rs, where a seat's quota signal is read (`let quota = obs.flags.contains(&ScreenFlag::Quota) && obs.idle;`, near line 284), a seat whose profile's `usage_log` is `claude-jsonl` also signals quota when `gear_usage::claude_limit_stop(<the seat's session>)` returns a stop whose `resets_at` is absent or later than now (the session is `obs.session`, the same value captain_quota.rs passes; skip when it is empty). The rest of the lane quota machine (confirm rounds, source, fallback, park) is unchanged; when the stop has a `resets_at`, the park or fallback uses it as the reset instead of `[models] quota_reset_h` if the machine already takes a reset time, else leave the reset as it is.
+accept: tests: a claude lane whose session log carries a rejected `quotaLimits` record with a future reset is treated as out of quota after its confirm rounds (parked or switched as its policy says); one whose record's reset has passed is not; a pi lane is unaffected.
+estimate: 20
 deps: -
