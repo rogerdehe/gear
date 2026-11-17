@@ -4,6 +4,7 @@
 use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
+use gear_app::tasks::attempt_model_key;
 use gear_app::Env;
 use gear_model::{ErrorCode, GearCtx, SeatRole};
 use gear_store::{testing, Store};
@@ -214,6 +215,43 @@ fn the_captains_done_line_records_a_landed_commit_as_done_and_merged() {
     assert_eq!(
         s.read(|tx| tx.attempts_of_task("p", "T-1")).unwrap().len(),
         1
+    );
+}
+
+/// M7.3: the captain's own attempt records the model its seat runs, or the
+/// CLI its binding names when no model meta says one.
+#[test]
+fn the_captains_done_line_records_the_captains_model() {
+    let first = repo();
+    let mut s = alone_in(&first);
+    let line = format!(
+        "# Verdicts\n- T-1 done commit={} evidence=make gate passes\n",
+        first.landed
+    );
+    run(&mut s, &line).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_meta(&attempt_model_key("p", "T-1", 1)))
+            .unwrap()
+            .as_deref(),
+        Some("claude (captain)"),
+        "no model meta: the binding kind"
+    );
+
+    // A model meta names the model the seat runs now.
+    let with_model = repo();
+    let mut s = alone_in(&with_model);
+    s.write(|tx| tx.set_meta("engine.model.p:captain", "claude-opus"))
+        .unwrap();
+    let line = format!(
+        "# Verdicts\n- T-1 done commit={} evidence=make gate passes\n",
+        with_model.landed
+    );
+    run(&mut s, &line).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_meta(&attempt_model_key("p", "T-1", 1)))
+            .unwrap()
+            .as_deref(),
+        Some("claude-opus")
     );
 }
 
