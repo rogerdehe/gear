@@ -3796,6 +3796,7 @@ fn run_plan(
         result.version,
         &result.created,
         &used_staff,
+        &result.labels,
         &result.milestone_blocks,
     );
     write_in_place(path, &rewritten).map_err(|e| {
