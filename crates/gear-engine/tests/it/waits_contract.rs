@@ -592,6 +592,36 @@ fn a_later_message_ends_an_external_wait() {
     );
 }
 
+/// A lane that worked another task during an external wait and has nothing in
+/// flight now is sent back to the waiting task at once, not left idle until
+/// the wait runs out (MissHerAI T-30, 2026-11-17: idle for over an hour).
+#[test]
+fn an_external_wait_ends_when_the_lane_runs_out_of_other_work() {
+    let (mut s, mut h, c) = world();
+    wait_outside(&mut s, 10);
+    // The lane takes T-2 meanwhile and hands it in.
+    s.write(|tx| {
+        gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T + 20)?;
+        gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T + 20)?;
+        gear_app::tasks::submit_result(tx, "p", "T-2", 1, 1, "abc1234", "reports/T-2.md", T + 50)
+    })
+    .unwrap();
+    advance(&mut s, &mut h, &c, 60);
+
+    assert_eq!(external_wait(&mut s), (None, None), "the wait is over");
+    let told = s
+        .read(|tx| tx.thread_messages("p", "wait-external-idle:T-1:1"))
+        .unwrap();
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].recipient, "p:heat");
+    assert!(told[0].urgent);
+    assert!(
+        told[0].body.contains("the CI run on heat/t1"),
+        "{}",
+        told[0].body
+    );
+}
+
 /// 120 minutes with no word from the lane: the wait ends and the lane is told
 /// to push what it has, or to declare the wait again.
 #[test]
