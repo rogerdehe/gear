@@ -480,10 +480,9 @@ fn git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// T-622: a project's integration branch lives for one voyage. Every lane,
-/// review and merge worktree is cut from `<remote>/<integration>`, and a
-/// landing's reclaim deletes the branch once it is on the release branch, so
-/// the next voyage must cut it again. Called before a worktree is created:
+/// T-622: every lane, review and merge worktree is cut from
+/// `<remote>/<integration>`; a new project, or one whose integration branch
+/// was removed by hand, has none yet. Called before a worktree is created:
 /// when the remote has no `<integration>` after a fetch, push
 /// `<remote>/<release>` to `refs/heads/<integration>` once, fetch again, and
 /// tell the captain in one Info item. An integration branch equal to the
@@ -991,8 +990,8 @@ fn onboard_seat(
     let created = match opened {
         Outcome::Ok(worktree) => worktree,
         Outcome::Refused { code, .. } if code == "worktree_not_found" => {
-            // T-622: the integration branch a landing's reclaim deleted is cut
-            // again from the release branch before the first worktree.
+            // T-622: a missing integration branch is cut from the release
+            // branch before the first worktree.
             ensure_integration(store, &seat.project, config, &repo, now)?;
             match herdr.worktree_create(
                 &worktree.repo,
