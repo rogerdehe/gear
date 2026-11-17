@@ -3802,10 +3802,11 @@ fn restart_seat(tx: &Tx<'_>, project: &str, name: &str, line: usize, now: Ts) ->
             }
         }
     }
-    // The engine's restart step reads this flag; it waits for a working
-    // reviewer's verdict before it acts.
+    // The engine's restart step reads this request; it waits for a working
+    // reviewer's verdict before it acts. Its own key (T-709): the plan under
+    // `engine.restart.<seat>` is not overwritten by a request.
     tx.set_meta(
-        &format!("engine.restart.{seat_id}"),
+        &format!("engine.restart-request.{seat_id}"),
         &serde_json::json!({ "at": now }).to_string(),
     )?;
     Ok(())

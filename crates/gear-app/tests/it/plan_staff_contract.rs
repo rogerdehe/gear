@@ -1094,7 +1094,8 @@ fn restart_records_a_lanes_request() {
     let mut s = world();
     run_at(&mut s, "- restart heat\n", "restart").unwrap();
     assert_eq!(
-        s.read(|tx| tx.get_meta("engine.restart.p:heat")).unwrap(),
+        s.read(|tx| tx.get_meta("engine.restart-request.p:heat"))
+            .unwrap(),
         Some("{\"at\":1800000010}".to_string())
     );
     s.write(|tx| tx.set_seat_state("p:wire", SeatState::Held, Some("held"), T0))
@@ -1102,7 +1103,8 @@ fn restart_records_a_lanes_request() {
     let error = run_at(&mut s, "- restart wire\n", "restart-held").unwrap_err();
     assert_eq!(error.code, ErrorCode::BadTransition, "{error:?}");
     assert_eq!(
-        s.read(|tx| tx.get_meta("engine.restart.p:wire")).unwrap(),
+        s.read(|tx| tx.get_meta("engine.restart-request.p:wire"))
+            .unwrap(),
         None
     );
 }
