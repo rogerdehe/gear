@@ -2017,11 +2017,21 @@ fn tell_captain_failed(
             now,
         );
     }
-    let body = format!(
+    let mut body = format!(
         "merge of {task} failed: {reason}\nnothing was pushed\n\
          to retry it: `- remerge {task}` under `# Staff` in the plan, then `gear plan apply` \
          (only while the candidate is not on the integration branch)"
     );
+    // A conflict fails the same way on every retry: say what settles it
+    // (MissHerAI T-19, 2026-11-17: the captain had to guess).
+    if reason.contains("conflict") {
+        body.push_str(&format!(
+            "\na conflict fails again on a plain remerge. Either send it back: a fail verdict \
+             on {task} with `rework=\"merge the integration branch and resolve the conflict\"`; \
+             or merge the candidate into the integration branch by hand, push, and then \
+             `- remerge {task}` records it as merged"
+        ));
+    }
     store.write(|tx| {
         let captain = tx.captain_of(project)?.ok_or_else(|| {
             GearError::new(
@@ -6264,13 +6274,7 @@ fn sweep_branches(
     }
     store.write(|tx| tx.set_meta(&branch_sweep_key(project), &now.to_string()))?;
     let tasks = store.read(|tx| tx.tasks_of_project(project))?;
-    let mut repos: Vec<Repo> = Vec::new();
-    for task in &tasks {
-        let repo = config.repo_of_task(task);
-        if !repos.iter().any(|known| known.path == repo.path) {
-            repos.push(repo);
-        }
-    }
+    let repos = sweep_repos(config, &tasks);
     let remote = Target::of(config, cfg.remote.as_ref());
     for repo in repos {
         let dir = Path::new(&repo.path);
@@ -6303,6 +6307,25 @@ fn sweep_branches(
         )?;
     }
     Ok(())
+}
+
+/// The repos the branch sweep looks at, one per path, each with the
+/// integration branch the config names for it now — never the base an older
+/// task recorded (MissHerAI 2026-11-17: an M1 task's base `dev` made the sweep
+/// name T-19's branch as "not on dev" though it was on `selina/dev`).
+fn sweep_repos(config: &ProjectConfig, tasks: &[gear_store::TaskRow]) -> Vec<Repo> {
+    let configured = config.repos();
+    let mut repos: Vec<Repo> = Vec::new();
+    for task in tasks {
+        let mut repo = config.repo_of_task(task);
+        if let Some(current) = configured.iter().find(|known| known.path == repo.path) {
+            repo.integration = current.integration.clone();
+        }
+        if !repos.iter().any(|known| known.path == repo.path) {
+            repos.push(repo);
+        }
+    }
+    repos
 }
 
 /// The branches of `heads` (the output of `git ls-remote --heads`) that
@@ -10196,6 +10219,39 @@ mod tests {
         assert_eq!(open.len(), 1, "{items:?}");
         assert!(open[0].body.contains("a test failed"), "{}", open[0].body);
         assert_eq!(items.len(), 2, "the old item closed, a fresh one opened");
+    }
+
+    /// A conflict's item says what settles it (MissHerAI T-19, 2026-11-17): a
+    /// plain remerge fails again on the same conflict.
+    #[test]
+    fn a_conflicts_item_names_the_rework_and_the_hand_merge() {
+        let mut store = world(TaskState::Ready);
+        lost_task(&mut store, "abc1234", OpState::Failed, 5);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        tell_captain_failed(
+            &mut store,
+            "p",
+            &op,
+            "conflict merging heat/t5: web/x.ts",
+            10,
+        )
+        .unwrap();
+        let items = failed_items(&mut store, "T-5");
+        assert!(items[0].body.contains("rework="), "{}", items[0].body);
+        assert!(
+            items[0]
+                .body
+                .contains("merge the candidate into the integration branch by hand"),
+            "{}",
+            items[0].body
+        );
+
+        tell_captain_failed(&mut store, "p", &op, "the gate said no", 20).unwrap();
+        let open: Vec<_> = failed_items(&mut store, "T-5")
+            .into_iter()
+            .filter(|m| m.state == MsgState::Open)
+            .collect();
+        assert!(!open[0].body.contains("by hand"), "{}", open[0].body);
     }
 
     /// T-566: a merge worktree that cannot be used rings once, not once per
@@ -17809,6 +17865,43 @@ gate = "{project_gate}"
             body.contains("25 branch(es) of done tasks"),
             "the header keeps the full count: {body}"
         );
+    }
+
+    /// The sweep judges a repo's branches against the integration branch the
+    /// config names now, not an older task's recorded base.
+    #[test]
+    fn the_sweep_uses_the_configured_integration_not_an_old_tasks_base() {
+        let config = gear_app::config::parse(&config_text_in("true", Path::new("/repo"))).unwrap();
+        let root = config.root_repo();
+        let task = |id: &str, base: &str| gear_store::TaskRow {
+            repo: Some(root.path.clone()),
+            base: Some(base.into()),
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: id.into(),
+            rank: 1,
+            state: TaskState::Done,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            updated: 0,
+        };
+        let repos = sweep_repos(
+            &config,
+            &[task("T-1", "old-dev"), task("T-2", &root.integration)],
+        );
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].integration, root.integration);
     }
 
     // ---- T-632: the merge workers can drain ------------------------------
