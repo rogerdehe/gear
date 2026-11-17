@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1295 -->
+<!-- gear-plan project=gear base=1301 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -9,6 +9,10 @@ eta: 5h
 depart: now
 
 # Decisions
+- 2026-11-17 note: T-696's packet named a review.rs `on_integration` that does not exist (it is plan.rs's, done in T-697); the item is dropped from T-696. The CLI and skill go back to mast with T-700, T-704 and T-705, since mast ran dry and hull still holds T-693's rework and T-694 | why: M-8988 hull looped 55 min on the wrong name; M-8987 mast idle
+- station M-8986: keep course | why: 9 done at 82m, pace 0.26x, projected 109m from departure; both lanes busy
+- station M-8978: keep course | why: 75m in, pace 0.22x, projected 102m from departure against the 5h eta; both lanes busy
+- station M-8966: keep course | why: 60m in, pace 0.21x, 9 left projected 87m from departure; T-693 and T-698 back in rework, both lanes busy
 - 2026-11-17 05:00 confirmed: M7.3 done gains clause (6), estimates by measured model speed, with three tasks for mast and two for hull; the CLI and skill move from mast to hull with T-700 | why: the user asked for it mid-voyage: captains estimate in human hours (an hour for a few dozen lines, days for a small voyage) while this voyage's own pace is 0.14x
 - station M-8939: keep course | why: 6 done at 37m, both lanes busy, 5 left (about 4h of estimates over two lanes) inside the 263m left
 - 2026-11-17 note: T-698 drops the records-only line (M-8935): since v0.7.11 (T-622) the reclaim keeps an unreleased integration branch and never names it, so done (4)'s records-only clause is met by that: nothing urgent, nothing repeated | why: mast found the item the M7.1 leftover described no longer exists
@@ -56,8 +60,8 @@ estimate: 45
 deps: -
 
 ## T-696 [must] lane=hull milestone=M7.3 required
-goal: The engine's merged checks accept a squash. Replace the ancestry test with `gear_app::base::landed_in(dir, reference, commit)` in crates/gear-engine: merge.rs `prepare_merge`'s `already` (the candidate is on `base_ref`), `on_a_stable_branch`, the carried-task check in `land_carried`; review.rs `on_integration`; parallel.rs, the "candidate already in its base" test (`ancestor(&input.repo, &candidate, &base_tip)`). An error from `landed_in` keeps each site's current behavior for a git error (a check that cannot answer does not pass).
-accept: tests: after a squash merge, a restart of the same merge op says it was already merged and pushes nothing; the lost-merge scan does not name a squashed task; review.rs's check passes a squashed candidate; a task squashed onto dev is not an open change in the parallel-change check.
+goal: The engine's merged checks accept a squash. Replace the ancestry test with `gear_app::base::landed_in(dir, reference, commit)` in crates/gear-engine: merge.rs `prepare_merge`'s `already` (the candidate is on `base_ref`), `on_a_stable_branch`, the carried-task check in `land_carried`; parallel.rs, the "candidate already in its base" test (`ancestor(&input.repo, &candidate, &base_tip)`). An error from `landed_in` keeps each site's current behavior for a git error (a check that cannot answer does not pass).
+accept: tests: after a squash merge, a restart of the same merge op says it was already merged and pushes nothing; the lost-merge scan does not name a squashed task; a task squashed onto dev is not an open change in the parallel-change check.
 estimate: 45
 deps: T-692
 
@@ -79,7 +83,7 @@ accept: tests: a seat branch changing a code file is refused, its item names the
 estimate: 45
 deps: T-691
 
-## T-700 [must] lane=hull milestone=M7.3 required
+## T-700 [must] lane=mast milestone=M7.3 required
 goal: The departure move and the docs. (a) crates/gear-cli/src/main.rs, the integration branch moved forward to the release head at departure (near line 1640-1660, `behind` from two `merge-base --is-ancestor` calls): `behind` is also true when `gear_app::base::adds_nothing(release, integration)` and integration is not equal to release, so an integration branch squashed onto release starts from release. (b) skills/gear/references/conventions.md documents `merge_method` ("squash" default: one commit per task, a feature replays its tasks' commits; "merge": merge commits), and the trailers; skills/gear/references/github.md says `merge_method` under `[github]` is the pull-request method and the push mode reads `[conventions].merge_method`.
 accept: a test: an integration branch squashed onto main is moved to main's head at departure; one with its own work is left as it is. The two reference files carry the text.
 estimate: 30
@@ -103,15 +107,21 @@ accept: tests: with 5 measured attempts of a model at ratio 0.2, a new 60 min ta
 estimate: 20
 deps: T-702
 
-## T-704 [must] lane=hull milestone=M7.3 required
+## T-704 [must] lane=mast milestone=M7.3 required
 goal: `gear report speed`. In crates/gear-cli/src/main.rs add `ReportOp::Speed` (`gear report speed`, with `--json`): one row per model from `gear_app::speed::measured`: model, samples, median work minutes, median actual/estimate ratio (`0.14x`), under a header naming the store's period (last 90 days); no rows: one line saying nothing is measured yet. It reads the store of the caller's session like `gear report time`.
 accept: a CLI test: a store with attempts of two models prints both rows with their numbers; `--json` gives the same fields; an empty store prints the one line.
 estimate: 15
 deps: T-702
 
-## T-705 [must] lane=hull milestone=M7.3 required
+## T-705 [must] lane=mast milestone=M7.3 required
 goal: The skill tells the captain how to estimate. skills/gear/references/captain.md (where estimates and the eta are described) gets one paragraph: an estimate is the agent's working time on the model that runs the task, never a human's hours; run `gear report speed` before estimating and scale by the lane model's measured ratio; with nothing measured, a lane task of a few dozen lines is minutes, not an hour, and the station's pace corrects it; the voyage's eta is the slowest lane's sum, and an apply warning about an estimate is answered by fixing the estimate. skills/gear/references/departure.md (the sheet): the Eta row shows the eta and, when apply printed it, the measured forecast. Reinstall nothing (the captain does at release).
 accept: both files carry the text; `make check` for nothing else is needed (docs only).
 estimate: 10
 deps: -
 
+
+## T-706 [should] lane=mast milestone=M7.3 required
+goal: Fix the flaky reclaim test. `finished::tests::a_clean_pushed_worktree_is_removed_and_not_named` (crates/gear-engine/src/finished.rs) fails when the finished tests run in parallel in one process (`cargo test -p gear-engine --lib finished::`, and reviewers' `make check CRATE=gear-engine` runs) and passes alone; it cost T-698's review several minutes (F-351). Find what the parallel tests share (a fixed path or name, the process scan of GEAR worktrees, a Herdr call) and give the test its own; never add a retry or a sleep.
+accept: `cargo test -p gear-engine --lib finished::` passes 5 times in a row; the test still asserts the worktree is removed and not named.
+estimate: 15
+deps: -
