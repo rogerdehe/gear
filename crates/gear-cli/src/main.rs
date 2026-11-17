@@ -288,6 +288,9 @@ enum ReportOp {
         #[arg(long)]
         voyage: Option<String>,
     },
+    /// How fast each model works (M7.3): the measured work time and the
+    /// actual/estimate ratio of the attempts it ran, over the last 90 days.
+    Speed,
     /// The captain's coverage report (T-474): the accepted attempts whose
     /// candidate is not on the integration branch — accepted and never landed.
     Coverage,
@@ -667,6 +670,7 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Queue { json }) => cmd_queue(json),
         Some(Cmd::Report { op }) => match op {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
+            ReportOp::Speed => cmd_report_speed(cli.json),
             ReportOp::Coverage => cmd_report_coverage(cli.json),
             ReportOp::Voyage { voyage, all } => cmd_report_voyage(voyage, all, cli.json),
         },
@@ -2833,6 +2837,59 @@ fn run_report_time(
         return serde_json::to_string(&report).map_err(json_error);
     }
     Ok(gear_app::time::render(&report))
+}
+
+/// `gear report speed`: how fast each model works (M7.3). One row per model
+/// measured from the store's attempts of the last 90 days: the samples, the
+/// median work time and the median actual/estimate ratio.
+///
+/// Read-only, so it starts no engine.
+fn cmd_report_speed(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_report_speed(&mut store, &env, &mut herdr, json, now_ts())?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear report speed` body, over injected state.
+fn run_report_speed(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    json: bool,
+    now: i64,
+) -> GearResult<String> {
+    observe_identity(store, env, herdr)?;
+    let speeds = store.read(|tx| gear_app::speed::measured(tx, now))?;
+    if json {
+        let rows: Vec<serde_json::Value> = speeds
+            .iter()
+            .map(|speed| {
+                serde_json::json!({
+                    "model": speed.model,
+                    "samples": speed.samples,
+                    "median_work_min": speed.median_work_min,
+                    "median_ratio": speed.median_ratio,
+                })
+            })
+            .collect();
+        let report = serde_json::json!({"period_days": 90, "models": rows});
+        return serde_json::to_string(&report).map_err(json_error);
+    }
+    if speeds.is_empty() {
+        return Ok("nothing is measured yet".to_string());
+    }
+    let mut out = String::from("Model speed · last 90 days");
+    for speed in &speeds {
+        out.push_str(&format!(
+            "\n{} · {} samples · median {}m of work · ratio {:.2}x",
+            speed.model, speed.samples, speed.median_work_min, speed.median_ratio
+        ));
+    }
+    Ok(out)
 }
 
 fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
@@ -7278,6 +7335,110 @@ path="api"
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+    }
+
+    /// M7.3: `gear report speed` prints one row per measured model with its
+    /// samples, median work time and ratio; `--json` gives the same fields;
+    /// an empty store says nothing is measured yet.
+    #[test]
+    fn report_speed_prints_a_row_per_model_and_says_when_nothing_is_measured() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                for (id, estimate, work, model) in [
+                    ("T-1", 100, 14, "model-a"),
+                    ("T-2", 100, 15, "model-a"),
+                    ("T-3", 100, 16, "model-a"),
+                    ("T-4", 50, 10, "model-b"),
+                ] {
+                    tx.insert_task(&TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        project: "p".into(),
+                        id: id.into(),
+                        rank: 1,
+                        state: gear_model::TaskState::Done,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: Some("M2".into()),
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: Some(estimate),
+                        issue: None,
+                        updated: T0,
+                    })?;
+                    tx.insert_attempt(&gear_store::AttemptRow {
+                        session_ref: None,
+                        session_cli: None,
+                        session_action: None,
+                        sent_at: None,
+                        project: "p".into(),
+                        task: id.into(),
+                        n: 1,
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        contract_version: 1,
+                        adopted_version: 1,
+                        pending_update: None,
+                        state: gear_model::AttemptState::Accepted,
+                        candidate: Some("abc".into()),
+                        report: None,
+                        safe_point: None,
+                        started: T0,
+                        updated: T0,
+                    })?;
+                    tx.set_attempt_time("p", id, 1, gear_store::AttemptStep::Started, T0)?;
+                    tx.set_attempt_time(
+                        "p",
+                        id,
+                        1,
+                        gear_store::AttemptStep::HandedIn,
+                        T0 + work * 60,
+                    )?;
+                    tx.set_meta(&format!("attempt.model:p:{id}:1"), model)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let out =
+            run_report_speed(&mut store, &env("captain", CAP_PANE), &mut herdr, false, T0).unwrap();
+        assert!(out.contains("last 90 days"), "{out}");
+        assert!(
+            out.contains("model-a · 3 samples · median 15m of work · ratio 0.15x"),
+            "{out}"
+        );
+        assert!(
+            out.contains("model-b · 1 samples · median 10m of work · ratio 0.20x"),
+            "{out}"
+        );
+
+        let json =
+            run_report_speed(&mut store, &env("captain", CAP_PANE), &mut herdr, true, T0).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["period_days"], 90);
+        let models = value["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["model"], "model-a");
+        assert_eq!(models[0]["samples"], 3);
+        assert_eq!(models[0]["median_work_min"], 15);
+        assert_eq!(models[0]["median_ratio"], 0.15);
+        assert_eq!(models[1]["model"], "model-b");
+        assert_eq!(models[1]["samples"], 1);
+        assert_eq!(models[1]["median_work_min"], 10);
+        assert_eq!(models[1]["median_ratio"], 0.2);
+
+        let (mut empty, mut herdr) = world();
+        let out =
+            run_report_speed(&mut empty, &env("captain", CAP_PANE), &mut herdr, false, T0).unwrap();
+        assert_eq!(out, "nothing is measured yet");
     }
 
     /// T-474: `gear report coverage` lists the accepted attempts whose
