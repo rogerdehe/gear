@@ -252,6 +252,28 @@ fn a_finished_task_with_a_stale_wait_does_not_make_the_lane_wait() {
     );
 }
 
+/// A lane that waits on one task and works its next one meanwhile is
+/// working (selina media, 2026-11-17: T-30 waited on `external`, T-34 was
+/// worked, and the queue said "idle: waiting for external").
+#[test]
+fn a_lane_that_works_another_task_during_a_wait_is_not_idle() {
+    let mut store = world();
+    task(
+        &mut store,
+        "T-30",
+        1,
+        TaskState::Running,
+        vec![],
+        Some("external"),
+    );
+    attempt(&mut store, "T-30", 1, AttemptState::Started);
+    task(&mut store, "T-34", 2, TaskState::Running, vec![], None);
+    attempt(&mut store, "T-34", 1, AttemptState::Started);
+
+    let (reason, _) = reason_of(&mut store, T0);
+    assert_eq!(reason, None, "the lane works T-34");
+}
+
 /// T-562: the queue's next task is the first one, in the order of the plan,
 /// whose dependencies are all merged — the rule the engine dispatches by, so a
 /// later task that can start is the one the lane is told about.

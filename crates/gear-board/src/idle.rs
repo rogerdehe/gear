@@ -98,6 +98,27 @@ pub enum IdleReason {
     NoWork,
 }
 
+/// Whether the seat has an attempt in flight on a task that declares no wait.
+fn works_a_task_without_a_wait(tx: &Tx<'_>, project: &str, seat_id: &str) -> GearResult<bool> {
+    for attempt in tx.open_attempts_of_seat(seat_id)? {
+        if !matches!(
+            attempt.state,
+            gear_model::AttemptState::Delivered
+                | gear_model::AttemptState::Started
+                | gear_model::AttemptState::Unknown
+        ) {
+            continue;
+        }
+        if tx
+            .get_task(project, &attempt.task)?
+            .is_some_and(|task| task.wait_on.is_none())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The reason the lane is idle; None while it works (§13.6).
 ///
 /// `lane` is the name of the lane (the seat is `<project>:<lane>`); a lane
@@ -180,6 +201,12 @@ pub fn idle_reason(
             waiting = Some(task);
             break;
         }
+    }
+    // A lane that waits on one task and works another meanwhile (the engine
+    // gives it its next task during the wait) is working, not idle (selina
+    // media, 2026-11-17: T-30 waited on `external` while T-34 was worked).
+    if waiting.is_some() && works_a_task_without_a_wait(tx, project, &seat_id)? {
+        waiting = None;
     }
     if let Some(task) = waiting {
         return Ok(Some(IdleReason::Waiting {

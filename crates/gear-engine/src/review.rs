@@ -3720,7 +3720,12 @@ fn start_reviewer(
                 gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done
             )
         });
-        if !ready {
+        // A warm seat resuming the conversation of an earlier review quits its
+        // agent and starts it again: between the two it is neither idle nor
+        // done, and this pass is the only thing that drives that switch
+        // (selina T-17, 2026-11-17: the switch stopped after its first step,
+        // the review waited two minutes until the seat was released as gone).
+        if !ready && !crate::release::a_session_switch_is_in_flight(store, seat, now)? {
             return Ok(Started::NotYet);
         }
         let current_repo = store
@@ -11990,6 +11995,228 @@ review = [
     /// task's earlier review, not the seat's latest one. The seat reviews T-1
     /// attempt 1 in session A, then T-2 in session B; T-1 attempt 2's review
     /// must start with A.
+    #[test]
+    fn a_warm_seats_resume_goes_on_while_its_agent_is_away() {
+        // selina T-17, 2026-11-17: a Standby seat picked for a re-review quits
+        // its agent to resume the review's conversation; between the quit and
+        // the restart the pane holds no idle agent, and the review start pass
+        // must still drive the switch instead of waiting for the seat to be
+        // released as gone.
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        // T-1 attempt 1's review runs on review-1: session A.
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 10,
+        )
+        .unwrap();
+        let seat = "p:review-1";
+        let a = store
+            .read(|tx| tx.get_meta(&session_key("p", "T-1")))
+            .unwrap()
+            .filter(|session| !session.is_empty())
+            .unwrap_or_else(|| "sess-a".to_string());
+        store
+            .write(|tx| {
+                tx.add_round_session(
+                    &gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    &a,
+                )?;
+                tx.set_binding_session_ref(seat, 1, &a)
+            })
+            .unwrap();
+        // The verdict fails attempt 1; the seat waits, warm.
+        store
+            .write(|tx| {
+                judged(tx, "T-1", 1, seat, false)?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                attempt.updated = T0 + 20;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                task.rework_note = Some("F1: the parser drops the second line".into());
+                task.updated = T0 + 20;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 20).unwrap(),
+            vec![seat.to_string()]
+        );
+        // T-2 is handed in and its review runs on the same seat: session B.
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-2".into(),
+                    rank: 2,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0 + 20,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-2".into(),
+                    version: 1,
+                    goal: "the other goal".into(),
+                    accept: "the other criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 20,
+                    mechanical: None,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T0 + 21)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0 + 21)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-2",
+                    1,
+                    1,
+                    "def5678",
+                    "reviews/T-2.md",
+                    T0 + 21,
+                )
+            })
+            .unwrap();
+        let mut t2_open = None;
+        for tick in T0 + 22..T0 + 30 {
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", tick).unwrap();
+            t2_open = store.read(|tx| tx.open_round_of_seat(seat)).unwrap();
+            let active = store
+                .read(|tx| tx.get_seat(seat))
+                .unwrap()
+                .is_some_and(|seat| seat.state == SeatState::Active);
+            if active
+                && t2_open
+                    .as_ref()
+                    .is_some_and(|round| round.task == "T-2" && round.attempt == 1)
+            {
+                break;
+            }
+        }
+        t2_open.expect("the review of T-2 opens on the same seat");
+        let b = "sess-b".to_string();
+        store
+            .write(|tx| {
+                tx.add_round_session(
+                    &gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-2".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    &b,
+                )?;
+                tx.set_binding_session_ref(seat, 1, &b)
+            })
+            .unwrap();
+        // T-2 is judged; the seat waits again.
+        store
+            .write(|tx| {
+                judged(tx, "T-2", 1, seat, true)?;
+                let mut attempt = tx.get_attempt("p", "T-2", 1)?.unwrap();
+                attempt.state = AttemptState::Accepted;
+                attempt.updated = T0 + 25;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-2")?.unwrap();
+                task.state = TaskState::Done;
+                task.updated = T0 + 25;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 25).unwrap(),
+            vec![seat.to_string()]
+        );
+        // T-1 attempt 2 is handed in: the re-review starts on the same seat.
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 30)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 30)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    2,
+                    1,
+                    "def5678",
+                    "reports/T-1.md",
+                    T0 + 30,
+                )
+            })
+            .unwrap();
+        start_reviews(
+            &mut store,
+            &mut herdr,
+            &cfg(),
+            &cfg().profiles,
+            "p",
+            T0 + 31,
+        )
+        .unwrap();
+        let pane = store
+            .read(|tx| tx.get_binding(seat, tx.get_seat(seat)?.unwrap().generation))
+            .unwrap()
+            .unwrap()
+            .pane_id;
+        assert_ne!(
+            store.read(|tx| tx.get_seat(seat)).unwrap().unwrap().state,
+            SeatState::Active,
+            "the switch is still on its way after the first tick"
+        );
+        // The agent quits for the resume: the pane holds no agent until the
+        // runner starts it again.
+        herdr.exit_agent(&pane);
+        let mut active = false;
+        for tick in T0 + 32..T0 + 40 {
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", tick).unwrap();
+            active = store
+                .read(|tx| tx.get_seat(seat))
+                .unwrap()
+                .is_some_and(|seat| seat.state == SeatState::Active);
+            if active {
+                break;
+            }
+        }
+        assert!(
+            active,
+            "the review starts on the seat once its agent is back"
+        );
+        let action = store
+            .read(|tx| tx.get_meta("engine.review_action.p.T-1.2"))
+            .unwrap();
+        let action: serde_json::Value =
+            serde_json::from_str(action.as_deref().expect("the action is recorded")).unwrap();
+        assert_eq!(action["action"], "resume", "{action}");
+    }
+
     #[test]
     fn a_rereview_after_another_task_resumes_the_reviews_own_session() {
         let mut store = world(CONFIG);
