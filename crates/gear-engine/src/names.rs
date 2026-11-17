@@ -384,6 +384,12 @@ pub fn restore(
         ) {
             continue;
         }
+        // Another agent holds the pane: it keeps its own name (pharos,
+        // 2026-11-16 — the seat's name on it is what aimed the seat's prompts
+        // at it).
+        if store.read(|tx| crate::observe::is_foreign(tx, &seat.id, seat.generation))? {
+            continue;
+        }
         // A pane may hold the seats of several projects (T-485, T-570): its one
         // agent carries one name, and every seat bound to that pane accepts it.
         // Naming it after each seat in turn flipped the Prometheus captain
