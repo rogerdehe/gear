@@ -4334,7 +4334,9 @@ fn prepare_merge(
             .get("goal")
             .and_then(|goal| goal.as_str())
             .unwrap_or_default();
-        let goal = if goal.trim().is_empty() { commit } else { goal };
+        // No goal: the subject is the task id alone (M7.3 rework F1), never
+        // the unfilled merge template.
+        let goal = if goal.trim().is_empty() { "" } else { goal };
         let sources: Vec<String> = merges.iter().map(|(target, _)| target.clone()).collect();
         let message = gear_model::commit::squash_message(
             &task,
@@ -17708,7 +17710,26 @@ gate = "{project_gate}"
         assert_eq!(first_parents, 1, "T-1's commit is no merge: {log}");
         assert_eq!(second_parents.len(), 1, "T-2's commit is no merge: {log}");
         assert_eq!(second_parents[0], first_sha, "T-2 lands on T-1: {log}");
-        assert!(first_subject.starts_with("T-1: "), "{first_subject}");
-        assert!(second_subject.starts_with("T-2: "), "{second_subject}");
+        assert!(first_subject.starts_with("T-1"), "{first_subject}");
+        assert!(second_subject.starts_with("T-2"), "{second_subject}");
+        assert!(!first_subject.contains('{'), "{first_subject}");
+        assert!(!second_subject.contains('{'), "{second_subject}");
+    }
+
+    /// M7.3 rework F1: a merge op without a goal lands a subject built from
+    /// the task id alone, never the unfilled merge template.
+    #[test]
+    fn a_squash_without_a_goal_lands_the_task_id_alone() {
+        let scratch = Scratch::new("squash-no-goal");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let carrier = op(&candidate);
+
+        let merged = merge_one(&worktree, &repo_method("true", "squash"), &carrier);
+
+        assert!(merged.is_ok(), "{merged:?}");
+        let subject = sh(&scratch.root, "git -C origin.git log -1 --format=%s dev");
+        assert_eq!(subject, "T-5", "the task id alone: {subject}");
+        assert!(!subject.contains('{'), "no placeholder: {subject}");
     }
 }
