@@ -610,9 +610,21 @@ pub fn execute_intended(
                     (OpState::Intended, Some(reason))
                 }
                 // The seat's agent is gone: the op fails at once, with that
-                // reason (design §10.1).
+                // reason (design §10.1) — unless the seat's binding was made
+                // moments ago: its agent is still starting (a restart opens
+                // the binding and types the agent's command in the same tick),
+                // so the op waits for it (MissHerAI T-26, 2026-11-17: a
+                // delivery right after `- restart room` failed and rang a
+                // false "lane is stuck").
                 (Prepared::Run { .. }, Some(Aimed::Gone(reason))) => {
-                    (OpState::Failed, Some(format!("agent-gone: {reason}")))
+                    if binding_is_starting(tx, project, item.id(), now)? {
+                        (
+                            OpState::Intended,
+                            Some(format!("the seat's agent is still starting: {reason}")),
+                        )
+                    } else {
+                        (OpState::Failed, Some(format!("agent-gone: {reason}")))
+                    }
                 }
                 (Prepared::Run { .. }, Some(Aimed::Refused(reason))) => {
                     (OpState::Failed, Some(reason))
@@ -720,6 +732,21 @@ impl Prepared {
             Prepared::Void { id, .. } => id,
         }
     }
+}
+
+/// How long after its binding was made a seat's agent may still be starting
+/// up: a pane with no agent then is a start in progress, not a lost agent.
+const AGENT_START_GRACE_S: i64 = 60;
+
+/// Whether the binding the op targets was made less than
+/// [`AGENT_START_GRACE_S`] ago.
+fn binding_is_starting(tx: &Tx<'_>, project: &str, op_id: &str, now: Ts) -> GearResult<bool> {
+    let Some(op) = tx.get_op(project, op_id)? else {
+        return Ok(false);
+    };
+    Ok(tx
+        .get_binding(&op.seat, op.generation)?
+        .is_some_and(|binding| now - binding.created < AGENT_START_GRACE_S))
 }
 
 /// Re-check an op against the seat's current state: the generation fixed at
