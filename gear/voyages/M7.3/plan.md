@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1289 -->
+<!-- gear-plan project=gear base=1294 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -9,6 +9,10 @@ eta: 5h
 depart: now
 
 # Decisions
+- 2026-11-17 05:00 confirmed: M7.3 done gains clause (6), estimates by measured model speed, with three tasks for mast and two for hull; the CLI and skill move from mast to hull with T-700 | why: the user asked for it mid-voyage: captains estimate in human hours (an hour for a few dozen lines, days for a small voyage) while this voyage's own pace is 0.14x
+- station M-8939: keep course | why: 6 done at 37m, both lanes busy, 5 left (about 4h of estimates over two lanes) inside the 263m left
+- 2026-11-17 note: T-698 drops the records-only line (M-8935): since v0.7.11 (T-622) the reclaim keeps an unreleased integration branch and never names it, so done (4)'s records-only clause is met by that: nothing urgent, nothing repeated | why: mast found the item the M7.1 leftover described no longer exists
+- station M-8917: keep course | why: 3 done at 18m (T-691 merged, T-690 and T-692 queued to merge), both lanes busy, T-695 in review; well inside the 5h eta
 - 2026-11-17 01:40 confirmed: M7.3 departure, not departed -> departs now with the scope above, eta 5h | why: the user ordered the voyage's work and staffing in their own words
 - 2026-11-17 note: scope agreed with the user: local squash plus rebase (one commit per gated change, never one per voyage), and the four M7.1 leftovers that sit in the same merge and landing code (parallel check, integrated-by, records-only landing, records merge files) | why: the user's call after the M8 backlog review; M7.3 is a small voyage, patches stay v0.7.x
 - 2026-11-17 note: staffing: hull and mast on the self-hosted DeepSeek V4.1 Flash, two reviewers on DeepSeek V4 Pro through opencode-go | why: the user's staffing for M7.3
@@ -46,10 +50,10 @@ estimate: 60
 deps: T-693
 
 ## T-695 [must] lane=hull milestone=M7.3 required
-goal: Members are found by trailer. In crates/gear-engine/src/merge.rs: `bisect_members` also takes a non-merge commit as a member when its message carries `Gear-Task: <task>` (read the log with `--format=%H%x09%P%x09%s%x09%(trailers:key=Gear-Task,valueonly,separator=%x2C)`; the member's name is the trailer's task); `run_bisect`'s probe stays a merge of the k-th member onto the base (on a linear feature branch that brings members 1..k). In `prepare_merge`'s `members_in` (the feature integration task's members), a first-parent commit with a `Gear-Task` trailer is a member too, its own commit (not `^2`) left out of the foreign-commit check.
+goal: Members are found by trailer (write the key as the literal `Gear-Task`; T-691 adds the constant in parallel, no wait for it). In crates/gear-engine/src/merge.rs: `bisect_members` also takes a non-merge commit as a member when its message carries `Gear-Task: <task>` (read the log with `--format=%H%x09%P%x09%s%x09%(trailers:key=Gear-Task,valueonly,separator=%x2C)`; the member's name is the trailer's task); `run_bisect`'s probe stays a merge of the k-th member onto the base (on a linear feature branch that brings members 1..k). In `prepare_merge`'s `members_in` (the feature integration task's members), a first-parent commit with a `Gear-Task` trailer is a member too, its own commit (not `^2`) left out of the foreign-commit check.
 accept: tests: a feature branch of three squashed members bisects to the member that breaks the gate; a feature integration task whose branch holds squashed members and no lane commit after the candidate is not refused as foreign; merge-commit members still work as before.
 estimate: 45
-deps: T-691
+deps: -
 
 ## T-696 [must] lane=hull milestone=M7.3 required
 goal: The engine's merged checks accept a squash. Replace the ancestry test with `gear_app::base::landed_in(dir, reference, commit)` in crates/gear-engine: merge.rs `prepare_merge`'s `already` (the candidate is on `base_ref`), `on_a_stable_branch`, the carried-task check in `land_carried`; review.rs `on_integration`; parallel.rs, the "candidate already in its base" test (`ancestor(&input.repo, &candidate, &base_tip)`). An error from `landed_in` keeps each site's current behavior for a git error (a check that cannot answer does not pass).
@@ -75,8 +79,39 @@ accept: tests: a seat branch changing a code file is refused, its item names the
 estimate: 45
 deps: T-691
 
-## T-700 [must] lane=mast milestone=M7.3 required
+## T-700 [must] lane=hull milestone=M7.3 required
 goal: The departure move and the docs. (a) crates/gear-cli/src/main.rs, the integration branch moved forward to the release head at departure (near line 1640-1660, `behind` from two `merge-base --is-ancestor` calls): `behind` is also true when `gear_app::base::adds_nothing(release, integration)` and integration is not equal to release, so an integration branch squashed onto release starts from release. (b) skills/gear/references/conventions.md documents `merge_method` ("squash" default: one commit per task, a feature replays its tasks' commits; "merge": merge commits), and the trailers; skills/gear/references/github.md says `merge_method` under `[github]` is the pull-request method and the push mode reads `[conventions].merge_method`.
 accept: a test: an integration branch squashed onto main is moved to main's head at departure; one with its own work is left as it is. The two reference files carry the text.
 estimate: 30
 deps: T-692
+
+## T-701 [must] lane=mast milestone=M7.3 required
+goal: Record the model of every attempt. In crates/gear-app/src/tasks.rs `start_attempt` (where `tx.insert_attempt(&row)` runs) write meta `attempt.model:<project>:<task>:<n>` = the value of meta `engine.model.<seat>` (the model the seat runs now; write nothing when that meta is empty or absent). In the captain's done line path (the `insert_attempt` near line 744, a captain recording its own task done) write the same key with the captain seat's `engine.model.<seat>`, or `<binding kind> (captain)` when that meta is absent. Add `pub fn attempt_model_key(project, task, n) -> String` in tasks.rs.
+accept: tests: a started attempt of a lane whose seat meta names a model carries that model under the key; a seat with no model meta writes nothing; a captain done line writes the captain's model or `claude (captain)`.
+estimate: 15
+deps: -
+
+## T-702 [must] lane=mast milestone=M7.3 required
+goal: Measure each model's speed. New module crates/gear-app/src/speed.rs (add `pub mod speed;` in lib.rs): `pub struct ModelSpeed { pub model: String, pub samples: u32, pub median_work_min: u32, pub median_ratio: f64 }` and `pub fn measured(tx: &Tx<'_>, now: Ts) -> GearResult<Vec<ModelSpeed>>`: over every project's attempts in the store from the last 90 days that were handed in, the work time is the dev time `crate::time` already computes for `gear report time` (reuse it, do not compute a second one) and the estimate is the task's `estimate_min` for attempt 1, `rework_estimate_min` for a later one (an attempt without an estimate counts for the work time, not the ratio); the model is `attempt.model:` meta, else the seat's current `engine.model.<seat>`, else the attempt is skipped. A captain's own done task counts too: its work time is its merge time minus the previous captain-done merge of the same voyage, or the voyage's departure for the first. Sorted by samples, most first. And `pub fn calibrated(speeds: &[ModelSpeed], model: &str, estimate_min: u32) -> Option<u32>` = `estimate_min × median_ratio` rounded, only when that model has at least 5 samples with a ratio.
+accept: unit tests on an in-memory store: three models with known attempts give the right samples, medians and ratio; a captain-alone voyage's done tasks are measured from merge to merge; `calibrated` is None under 5 samples and the scaled minutes at 5 or more.
+estimate: 20
+deps: -
+
+## T-703 [must] lane=mast milestone=M7.3 required
+goal: Plan apply names estimates far from the measured speed. In crates/gear-app/src/plan.rs, after a successful apply, for each task of the applied file whose estimate is new or changed in this apply and whose lane has a model (the lane's first `models` entry in the config, else `engine.model.<seat>`; a captain's task: the captain seat's model), when `speed::calibrated` gives a value and the estimate is more than twice it or less than half of it, add a warning: `T-n: estimate <e> min; <model> has taken <ratio>x its estimates over <samples> tasks (median <m> min of work): about <c> min`. In the apply that departs a voyage (or applies with `--confirmed` to a departed one), add one line `eta <eta>; the measured speed of the lanes' models puts the open tasks at about <h> on the slowest lane` (per lane: the sum of calibrated minutes, or the estimate where none; the largest lane sum). Warnings only: nothing is refused.
+accept: tests: with 5 measured attempts of a model at ratio 0.2, a new 60 min task on its lane gets the warning naming about 12 min; a 15 min task gets none; under 5 samples no warning; the departing apply prints the eta line.
+estimate: 20
+deps: T-702
+
+## T-704 [must] lane=hull milestone=M7.3 required
+goal: `gear report speed`. In crates/gear-cli/src/main.rs add `ReportOp::Speed` (`gear report speed`, with `--json`): one row per model from `gear_app::speed::measured`: model, samples, median work minutes, median actual/estimate ratio (`0.14x`), under a header naming the store's period (last 90 days); no rows: one line saying nothing is measured yet. It reads the store of the caller's session like `gear report time`.
+accept: a CLI test: a store with attempts of two models prints both rows with their numbers; `--json` gives the same fields; an empty store prints the one line.
+estimate: 15
+deps: T-702
+
+## T-705 [must] lane=hull milestone=M7.3 required
+goal: The skill tells the captain how to estimate. skills/gear/references/captain.md (where estimates and the eta are described) gets one paragraph: an estimate is the agent's working time on the model that runs the task, never a human's hours; run `gear report speed` before estimating and scale by the lane model's measured ratio; with nothing measured, a lane task of a few dozen lines is minutes, not an hour, and the station's pace corrects it; the voyage's eta is the slowest lane's sum, and an apply warning about an estimate is answered by fixing the estimate. skills/gear/references/departure.md (the sheet): the Eta row shows the eta and, when apply printed it, the measured forecast. Reinstall nothing (the captain does at release).
+accept: both files carry the text; `make check` for nothing else is needed (docs only).
+estimate: 10
+deps: -
+
