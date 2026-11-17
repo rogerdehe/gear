@@ -4290,29 +4290,28 @@ fn prepare_merge(
     // 6b. a feature's integration task (M7.3): replay the feature's own
     //     commits onto the integration tip instead of a merge commit. The
     //     feature branch's first-parent, non-merge commits are the work it
-    //     carries; each is cherry-picked in order, and the last one names the
-    //     feature tip and the candidate in its trailers. A replay that
-    //     conflicts falls back to the task squash path below.
+    //     carries; each is cherry-picked in order. The reviewer's commits
+    //     (T-558: they sit on the task branch, which for a feature is the
+    //     feature branch) are folded into the last replayed commit, so their
+    //     records land but not as a commit of their own; that last commit then
+    //     names the feature tip and the candidate in its trailers. A replay
+    //     that conflicts falls back to the task squash path below.
     let mut replayed = false;
     let mut replay_conflicted = false;
     if keep_branch && repo.merge_method == gear_app::config::MergeMethod::Squash {
         if let Some(tip) = task_tip.clone() {
-            let commits: Vec<String> = match git(
+            let log = match git(
                 dir,
                 &[
-                    "rev-list",
+                    "log",
                     "--reverse",
                     "--first-parent",
                     "--no-merges",
+                    "--format=%H%x09%s",
                     &format!("{base_ref}..{tip}"),
                 ],
             ) {
-                Ok(log) => log
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_string)
-                    .collect(),
+                Ok(log) => log,
                 Err(reason) => {
                     probe.step("merge");
                     return Err(Step::Failed(Failed::clear(format!(
@@ -4320,7 +4319,19 @@ fn prepare_merge(
                     ))));
                 }
             };
-            if commits.is_empty() {
+            let mut commits: Vec<String> = Vec::new();
+            let mut reviews: Vec<String> = Vec::new();
+            for line in log.lines() {
+                let Some((commit, subject)) = line.split_once('\t') else {
+                    continue;
+                };
+                if subject.starts_with(review_prefix) {
+                    reviews.push(commit.to_string());
+                } else {
+                    commits.push(commit.to_string());
+                }
+            }
+            if commits.is_empty() && reviews.is_empty() {
                 probe.step("merge");
                 return Err(Step::Merged(format!(
                     "{task} was already merged: its work is on {remote_name}/{integration}"
@@ -4344,8 +4355,40 @@ fn prepare_merge(
                 }
             }
             if clean {
-                let last = commits.last().map(String::as_str).unwrap_or_default();
-                let mut message = git(dir, &["log", "-1", "--format=%B", last])
+                if commits.is_empty() {
+                    // No feature commit to fold a review into: the review
+                    // commits land as commits of their own (edge case).
+                    for commit in &reviews {
+                        if git(
+                            dir,
+                            &[
+                                "cherry-pick",
+                                "--allow-empty",
+                                "--keep-redundant-commits",
+                                commit,
+                            ],
+                        )
+                        .is_err()
+                        {
+                            clean = false;
+                            break;
+                        }
+                    }
+                } else {
+                    for commit in &reviews {
+                        if git(dir, &["cherry-pick", "--no-commit", commit]).is_err() {
+                            clean = false;
+                            break;
+                        }
+                        if git(dir, &["commit", "--amend", "--no-edit"]).is_err() {
+                            clean = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if clean {
+                let mut message = git(dir, &["log", "-1", "--format=%B", "HEAD"])
                     .unwrap_or_default()
                     .trim_end()
                     .to_string();
@@ -18062,26 +18105,28 @@ gate = "{project_gate}"
 
     // ---- T-694: a feature lands by replaying its commits -----------------
 
-    /// T-694: a feature branch holding two squashed member commits and a merge
-    /// of dev into it lands as those two commits on dev, in order, no merge
-    /// commit, the last one naming the feature tip and the candidate. The gate
-    /// runs once on the result.
+    /// T-694: a feature branch cut from dev, holding two squashed member
+    /// commits and the reviewer's commit, lands as exactly those two commits
+    /// on dev, in order, no merge commit; the review's records land inside the
+    /// last one, which names the feature tip and the candidate. The gate runs
+    /// once on the result.
     #[test]
     fn a_feature_replays_its_commits_onto_the_integration_branch() {
         let scratch = Scratch::new("feature-replay");
         let worktree = scratch.merge_worktree();
-        let candidate = scratch.head_of("heat/t5");
+        let candidate = scratch.head_of("dev");
+        let before: i64 = sh(&scratch.root, "git -C origin.git rev-list --count dev")
+            .parse()
+            .unwrap();
         sh(
             &scratch.work,
-            "git switch -q -c heat/f1 heat/t5 \
+            "git switch -q -c heat/f1 dev \
              && echo m6 > m6.txt && git add -A \
              && git -c user.name=a -c user.email=a@b commit -qm 'T-6: fix the findings' -m 'Gear-Task: T-6' \
              && echo m7 > m7.txt && git add -A \
              && git -c user.name=a -c user.email=a@b commit -qm 'T-7: fix the rest' -m 'Gear-Task: T-7' \
-             && git switch -q dev && echo d > d.txt && git add -A \
-             && git -c user.name=a -c user.email=a@b commit -qm 'dev work' \
-             && git push -q origin dev && git switch -q heat/f1 && git fetch -q origin \
-             && git -c user.name=a -c user.email=a@b merge -q --no-ff origin/dev -m 'merge(dev): origin/dev'",
+             && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass'",
         );
         publish(&scratch.work, "heat/f1");
         sh(
@@ -18098,6 +18143,10 @@ gate = "{project_gate}"
         let merged = merge_one(&worktree, &repo_method(&gate, "squash"), &carrier);
 
         assert!(merged.is_ok(), "{merged:?}");
+        let after: i64 = sh(&scratch.root, "git -C origin.git rev-list --count dev")
+            .parse()
+            .unwrap();
+        assert_eq!(after, before + 2, "exactly the two member commits land");
         let log = sh(
             &scratch.root,
             "git -C origin.git log --format=%H%x09%P%x09%s dev",
@@ -18118,6 +18167,7 @@ gate = "{project_gate}"
         assert_eq!(second_parents[0], first_sha, "in order: {log}");
         assert_eq!(first_subject, "T-6: fix the findings", "{log}");
         assert_eq!(second_subject, "T-7: fix the rest", "{log}");
+        assert!(!log.contains("review(T-5)"), "no review commit: {log}");
         let message = sh(&scratch.root, "git -C origin.git log -1 --format=%B dev");
         for trailer in [
             format!("Gear-Source: {tip}"),
@@ -18125,6 +18175,11 @@ gate = "{project_gate}"
         ] {
             assert!(message.contains(&trailer), "{trailer:?} in {message:?}");
         }
+        let review_file = sh(&scratch.root, "git -C origin.git show dev:r5.txt");
+        assert_eq!(
+            review_file, "r",
+            "the review's records land: {review_file:?}"
+        );
         let ran = std::fs::read_to_string(&count).unwrap_or_default();
         assert_eq!(ran.lines().count(), 1, "the gate ran once: {ran:?}");
     }
@@ -18142,6 +18197,8 @@ gate = "{project_gate}"
             "git switch -q -c heat/f1 heat/t5 \
              && printf 'feature\n' > README.md && git add -A \
              && git -c user.name=a -c user.email=a@b commit -qm 'T-6: change the readme' -m 'Gear-Task: T-6' \
+             && echo r > r5.txt && git add -A \
+             && git -c user.name=a -c user.email=a@b commit -qm 'review(T-5): pass' \
              && git switch -q dev && printf 'dev work\n' > README.md && git add -A \
              && git -c user.name=a -c user.email=a@b commit -qm 'dev work' \
              && git push -q origin dev && git switch -q heat/f1 && git fetch -q origin \
