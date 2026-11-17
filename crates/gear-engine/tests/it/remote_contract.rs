@@ -164,6 +164,7 @@ kind = "claude"
 profile = "claude"
 
 [conventions]
+merge_method = "merge"
 gate = "true"
 remote = "upstream"
 "#,

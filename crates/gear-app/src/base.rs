@@ -268,6 +268,157 @@ pub fn contains(worktree: &Path, base: &str, candidate: &str) -> GearResult<bool
     }
 }
 
+/// Run git in `dir`; a git that cannot be started is an error string, the
+/// caller reads the exit status and the output.
+fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|error| format!("cannot run git in {}: {error}", dir.display()))
+}
+
+/// Whether `commit` is on `reference` (M7.3): by ancestry, or by the trailers
+/// a squashed merge carries — a commit whose full sha is named by
+/// `Gear-Candidate:` or `Gear-Source:` in a commit of `reference` has landed
+/// there, though its own sha is not an ancestor.
+///
+/// A commit git cannot resolve is `Ok(false)`: it is not on the branch. Any
+/// other git failure is `Err` — a check that cannot answer never passes.
+pub fn landed_in(dir: &Path, reference: &str, commit: &str) -> Result<bool, String> {
+    let resolved = git(
+        dir,
+        &["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
+    )?;
+    if !resolved.status.success() {
+        return Ok(false);
+    }
+    let sha = String::from_utf8_lossy(&resolved.stdout).trim().to_string();
+    if sha.is_empty() {
+        return Ok(false);
+    }
+    let ancestor = git(dir, &["merge-base", "--is-ancestor", &sha, reference])?;
+    match ancestor.status.code() {
+        Some(0) => return Ok(true),
+        Some(1) => {}
+        _ => {
+            return Err(format!(
+                "cannot check whether {sha} is on {reference} in {}: {}",
+                dir.display(),
+                excerpt(&ancestor.stderr)
+            ))
+        }
+    }
+    let candidate = format!("--grep=Gear-Candidate: {sha}");
+    let source = format!("--grep=Gear-Source: {sha}");
+    let logged = git(
+        dir,
+        &[
+            "log",
+            "-1",
+            "--format=%H",
+            "-F",
+            &candidate,
+            &source,
+            reference,
+        ],
+    )?;
+    if !logged.status.success() {
+        return Err(format!(
+            "cannot read the commits of {reference} in {}: {}",
+            dir.display(),
+            excerpt(&logged.stderr)
+        ));
+    }
+    Ok(!String::from_utf8_lossy(&logged.stdout).trim().is_empty())
+}
+
+/// The tree `git merge-tree --write-tree <release> <integration>` writes, or
+/// `None` when the two conflict.
+fn merged_tree(dir: &Path, release: &str, integration: &str) -> Result<Option<String>, String> {
+    let merged = git(dir, &["merge-tree", "--write-tree", release, integration])?;
+    match merged.status.code() {
+        Some(0) => {
+            let tree = String::from_utf8_lossy(&merged.stdout)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            Ok(Some(tree))
+        }
+        // 1: the merge conflicts — the integration branch does not fit.
+        Some(1) => Ok(None),
+        _ => Err(format!(
+            "cannot merge {integration} into {release} in {}: {}",
+            dir.display(),
+            excerpt(&merged.stderr)
+        )),
+    }
+}
+
+/// The tree of `reference` (`git rev-parse <reference>^{tree}`).
+pub fn tree_of(dir: &Path, reference: &str) -> Result<String, String> {
+    let resolved = git(dir, &["rev-parse", &format!("{reference}^{{tree}}")])?;
+    if !resolved.status.success() {
+        return Err(format!(
+            "cannot resolve the tree of {reference} in {}: {}",
+            dir.display(),
+            excerpt(&resolved.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&resolved.stdout).trim().to_string())
+}
+
+/// Whether `integration` adds nothing to `release` (M7.3): it is an ancestor
+/// of `release`, or its content is already there — a merge of the two writes
+/// the tree `release` already has (a squash landed the same content).
+pub fn adds_nothing(dir: &Path, release: &str, integration: &str) -> Result<bool, String> {
+    let ancestor = git(dir, &["merge-base", "--is-ancestor", integration, release])?;
+    match ancestor.status.code() {
+        Some(0) => return Ok(true),
+        Some(1) => {}
+        _ => {
+            return Err(format!(
+                "cannot check whether {integration} is on {release} in {}: {}",
+                dir.display(),
+                excerpt(&ancestor.stderr)
+            ))
+        }
+    }
+    let Some(tree) = merged_tree(dir, release, integration)? else {
+        return Ok(false);
+    };
+    Ok(tree == tree_of(dir, release)?)
+}
+
+/// The paths `integration` adds to `release` (M7.3): what the merged tree
+/// changes against `release`'s own tree, `git diff --name-only`.
+pub fn added_paths(dir: &Path, release: &str, integration: &str) -> Result<Vec<String>, String> {
+    let tree = merged_tree(dir, release, integration)?.ok_or_else(|| {
+        format!(
+            "cannot merge {integration} into {release} in {}: the merge conflicts",
+            dir.display()
+        )
+    })?;
+    let release_tree = tree_of(dir, release)?;
+    let diffed = git(dir, &["diff", "--name-only", &release_tree, &tree])?;
+    if !diffed.status.success() {
+        return Err(format!(
+            "cannot diff {release_tree} against {tree} in {}: {}",
+            dir.display(),
+            excerpt(&diffed.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&diffed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Fetch the integration branch and name the ref that holds it (design
 /// §10.7, row B03-01): the answer about a candidate must be about the remote
 /// as it is now, so the branch is fetched first — a local tracking ref may be
@@ -645,5 +796,116 @@ mod may_delete_tests {
         for owned in ["p/dev", "p/hull/t9", "refs/heads/p/captain/M1", "hull/t10"] {
             assert!(may_delete_branch(owned), "{owned}");
         }
+    }
+}
+
+#[cfg(test)]
+mod landed_tests {
+    use super::*;
+    use std::process::Command;
+
+    /// A scratch git repo: `git init` on `release`, one commit, and the
+    /// identity every commit needs.
+    fn repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        run(&path, &["init", "-q", "-b", "release"]);
+        run(&path, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        (dir, path)
+    }
+
+    /// Run git in `dir`, failing the test on a non-zero exit.
+    fn run(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.email=a@b", "-c", "user.name=a"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Commit an empty change with `message` on the current branch; its sha.
+    fn commit(dir: &Path, message: &str) -> String {
+        run(dir, &["commit", "-q", "--allow-empty", "-m", message]);
+        run(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// Commit a file `name` with `content` on the current branch; its sha.
+    fn commit_file(dir: &Path, name: &str, content: &str) -> String {
+        std::fs::write(dir.join(name), content).unwrap();
+        run(dir, &["add", name]);
+        run(dir, &["commit", "-q", "-m", &format!("add {name}")]);
+        run(dir, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn an_ancestor_is_landed() {
+        let (_tmp, dir) = repo();
+        let base = run(&dir, &["rev-parse", "HEAD"]);
+        assert_eq!(landed_in(&dir, "release", &base), Ok(true));
+    }
+
+    #[test]
+    fn a_squashed_commit_is_landed_by_its_trailer() {
+        let (_tmp, dir) = repo();
+        run(&dir, &["switch", "-q", "-c", "feature"]);
+        let candidate = commit(&dir, "the work");
+        let source = commit(&dir, "more work");
+        run(&dir, &["switch", "-q", "release"]);
+        commit(
+            &dir,
+            &format!("T-1: the goal\n\nGear-Candidate: {candidate}\nGear-Source: {source}"),
+        );
+        assert_eq!(landed_in(&dir, "release", &candidate), Ok(true));
+        assert_eq!(landed_in(&dir, "release", &source), Ok(true));
+        // The full sha resolves to itself, and a prefix resolves too.
+        assert_eq!(landed_in(&dir, "release", &candidate[..7]), Ok(true));
+    }
+
+    #[test]
+    fn an_unrelated_commit_is_not_landed() {
+        let (_tmp, dir) = repo();
+        run(&dir, &["switch", "-q", "-c", "feature"]);
+        let unrelated = commit(&dir, "elsewhere");
+        run(&dir, &["switch", "-q", "release"]);
+        assert_eq!(landed_in(&dir, "release", &unrelated), Ok(false));
+        // A commit git cannot resolve is not landed, not an error.
+        assert_eq!(landed_in(&dir, "release", "deadbeef"), Ok(false));
+    }
+
+    #[test]
+    fn adds_nothing_for_an_ancestor_and_for_a_squashed_branch() {
+        let (_tmp, dir) = repo();
+        assert_eq!(adds_nothing(&dir, "release", "release"), Ok(true));
+        run(&dir, &["switch", "-q", "-c", "integration"]);
+        commit_file(&dir, "a.txt", "a");
+        run(&dir, &["switch", "-q", "release"]);
+        // The same content landed on release by a squash: another commit, the
+        // same tree.
+        commit_file(&dir, "a.txt", "a");
+        assert_eq!(adds_nothing(&dir, "release", "integration"), Ok(true));
+        assert_eq!(added_paths(&dir, "release", "integration"), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_branch_with_a_change_of_its_own_adds_paths() {
+        let (_tmp, dir) = repo();
+        run(&dir, &["switch", "-q", "-c", "integration"]);
+        commit_file(&dir, "a.txt", "a");
+        commit_file(&dir, "b.txt", "b");
+        run(&dir, &["switch", "-q", "release"]);
+        commit_file(&dir, "a.txt", "a");
+        assert_eq!(adds_nothing(&dir, "release", "integration"), Ok(false));
+        assert_eq!(
+            added_paths(&dir, "release", "integration"),
+            Ok(vec!["b.txt".to_string()])
+        );
     }
 }

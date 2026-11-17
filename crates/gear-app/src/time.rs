@@ -462,6 +462,12 @@ fn task_time(
     }
 }
 
+/// The dev time of an attempt: start → hand-in, the lane's work (T-38). The
+/// one computation every reader of the dev time uses.
+pub fn dev_of(times: &AttemptTimes) -> Option<i64> {
+    between(times.started, times.handed_in)
+}
+
 /// One round: the durations between its steps.
 fn round(n: i64, times: &AttemptTimes) -> Round {
     let last = times.last();
@@ -469,7 +475,7 @@ fn round(n: i64, times: &AttemptTimes) -> Round {
         n,
         start: times.started,
         last,
-        dev: between(times.started, times.handed_in),
+        dev: dev_of(times),
         review: between(times.handed_in, times.verdict),
         wait: between(times.verdict, times.settled),
         merge: between(times.settled, times.merged),

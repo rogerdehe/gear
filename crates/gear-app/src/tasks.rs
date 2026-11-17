@@ -120,7 +120,21 @@ pub fn start_attempt(
     // The delivery has its own time (T-38): it is the moment the attempt
     // reached the lane, and no later step may move it.
     tx.set_attempt_time(project, task, n, AttemptStep::Delivered, now)?;
+    // M7.3: the model the seat runs now is recorded with the attempt; a seat
+    // with no model meta (not managed) writes nothing.
+    if let Some(model) = tx
+        .get_meta(&format!("engine.model.{seat_id}"))?
+        .filter(|model| !model.is_empty())
+    {
+        tx.set_meta(&attempt_model_key(project, task, n), &model)?;
+    }
     Ok(row)
+}
+
+/// The meta key of the model an attempt ran on (M7.3):
+/// `attempt.model:<project>:<task>:<n>`.
+pub fn attempt_model_key(project: &str, task: &str, n: i64) -> String {
+    format!("attempt.model:{project}:{task}:{n}")
 }
 
 /// The seat's generation advances (a restart, a retry, a session step): the
@@ -761,6 +775,22 @@ pub fn record_own(
         session_action: None,
         sent_at: None,
     })?;
+    // M7.3: the captain's own attempt carries the model its seat runs, or the
+    // CLI the seat is bound to when no model meta says one.
+    let model = tx
+        .get_meta(&format!("engine.model.{seat}"))?
+        .filter(|model| !model.is_empty());
+    let model = match model {
+        Some(model) => Some(model),
+        None => {
+            let generation = tx.get_seat(&seat)?.map(|row| row.generation).unwrap_or(0);
+            tx.get_binding(&seat, generation)?
+                .map(|binding| format!("{} (captain)", binding.kind))
+        }
+    };
+    if let Some(model) = model {
+        tx.set_meta(&attempt_model_key(project, task, n), &model)?;
+    }
     for step in [
         AttemptStep::HandedIn,
         AttemptStep::Settled,
@@ -1135,6 +1165,11 @@ fn queue_merge(
             )
         })?,
     };
+    // M7.3: the squash's subject names the task's goal, so the op carries it.
+    let goal = tx
+        .get_contract(project, &task, task_row.contract_version)?
+        .map(|contract| contract.goal)
+        .unwrap_or_default();
     let op = tx.insert_op(&NewOp {
         project: project.to_string(),
         seat: anchor.id,
@@ -1149,6 +1184,7 @@ fn queue_merge(
             "candidate": attempt_row.candidate,
             "review": review,
             "keep_branch": feature_branch.is_some(),
+            "goal": goal,
         }),
         created: now,
     })?;

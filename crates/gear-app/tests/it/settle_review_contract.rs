@@ -204,6 +204,8 @@ fn a_pass_settles_the_task_and_queues_the_merge() {
     );
     assert_eq!(op.payload["branch"], serde_json::json!("heat/t1"));
     assert_eq!(op.payload["candidate"], serde_json::json!(CANDIDATE));
+    // M7.3: the squash's subject names the task's goal.
+    assert_eq!(op.payload["goal"], serde_json::json!("g"));
 
     // The review item is no longer an action item; the captain got one line.
     assert!(captain_inbox(&mut s).is_empty(), "no action item is left");

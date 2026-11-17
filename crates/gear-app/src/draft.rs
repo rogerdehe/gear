@@ -5,7 +5,7 @@
 //! `plan apply`'s job, not this parser's.
 
 use gear_model::{ErrorCode, GearError, GearResult};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
@@ -21,6 +21,9 @@ pub enum Priority {
 pub struct QueueItem {
     pub line: usize,
     pub id: Option<String>,
+    /// `## NEW:<label>`: the name another NEW block may depend on with
+    /// `deps: NEW:<label>` (M7.3). None for a plain `## NEW` or an existing id.
+    pub label: Option<String>,
     pub priority: Priority,
     pub lane: Option<String>,
     pub milestone: Option<String>,
@@ -584,6 +587,20 @@ fn parse_queue(lines: &[&str], index: &mut usize, queue: &mut Vec<QueueItem>) ->
     if let Some(item) = current.take() {
         queue.push(item);
     }
+    // M7.3: one label names one block; a second block with the same label
+    // would make `deps: NEW:<label>` ambiguous.
+    let mut labels: BTreeMap<&str, usize> = BTreeMap::new();
+    for item in queue.iter() {
+        let Some(label) = item.label.as_deref() else {
+            continue;
+        };
+        if let Some(first) = labels.insert(label, item.line) {
+            return Err(bad(
+                item.line,
+                format!("two blocks carry the label {label:?}: the first is on line {first}"),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -593,14 +610,30 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
     let id = tokens
         .next()
         .ok_or_else(|| bad(line, "a queue block header needs `T-<n>` or `NEW`"))?;
-    let id = if id == "NEW" {
-        None
+    let (id, label) = if id == "NEW" {
+        (None, None)
+    } else if let Some(label) = id.strip_prefix("NEW:") {
+        if label.is_empty() {
+            return Err(bad(line, "`NEW:` needs a label"));
+        }
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(bad(
+                line,
+                format!(
+                    "the label of `NEW:{label}` may hold lowercase letters, digits and `-` only"
+                ),
+            ));
+        }
+        (None, Some(label.to_string()))
     } else if is_task_id(id) {
-        Some(id.to_string())
+        (Some(id.to_string()), None)
     } else {
         return Err(bad(
             line,
-            format!("a queue block header needs `T-<n>` or `NEW`, got {id:?}"),
+            format!("a queue block header needs `T-<n>` or `NEW[:<label>]`, got {id:?}"),
         ));
     };
     let priority_token = tokens
@@ -647,6 +680,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
     Ok(QueueItem {
         line,
         id,
+        label,
         priority,
         lane,
         milestone,
@@ -1531,6 +1565,7 @@ pub fn rewrite_applied(
     version: i64,
     created: &[String],
     used_staff: &[usize],
+    labels: &[(String, String)],
     blocks: &[String],
 ) -> String {
     let source: Vec<&str> = text.lines().collect();
@@ -1549,6 +1584,11 @@ pub fn rewrite_applied(
             .filter(|(_, line)| !line.trim().is_empty())
             .all(|(index, _)| used.contains(&(index + 1)))
     });
+    // M7.3: `NEW:<label>` in a `deps:` line becomes the id the label got.
+    let by_label: BTreeMap<&str, &str> = labels
+        .iter()
+        .map(|(label, id)| (label.as_str(), id.as_str()))
+        .collect();
     let mut lines: Vec<String> = Vec::new();
     let mut ids = created.iter();
     let mut dropping = false;
@@ -1577,22 +1617,41 @@ pub fn rewrite_applied(
             dropping = true;
             continue;
         }
-        if trimmed
-            .strip_prefix("## ")
-            .and_then(|rest| rest.split_whitespace().next())
-            == Some("NEW")
-        {
-            if let Some(id) = ids.next() {
-                let indent = &line[..line.len() - line.trim_start().len()];
-                let rest = trimmed["## NEW".len()..].trim_start();
-                let header = if rest.is_empty() {
-                    format!("{indent}## {id}")
-                } else {
-                    format!("{indent}## {id} {rest}")
-                };
-                lines.push(header);
-                continue;
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            let token = rest.split_whitespace().next().unwrap_or_default();
+            if token == "NEW" || token.starts_with("NEW:") {
+                if let Some(id) = ids.next() {
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    let rest = rest[token.len()..].trim_start();
+                    let header = if rest.is_empty() {
+                        format!("{indent}## {id}")
+                    } else {
+                        format!("{indent}## {id} {rest}")
+                    };
+                    lines.push(header);
+                    continue;
+                }
             }
+        }
+        // M7.3: a `deps:` line names its NEW blocks by label; the file keeps
+        // the ids the apply gave them.
+        if let Some(value) = trimmed.strip_prefix("deps:") {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let deps: Vec<String> = value
+                .split(',')
+                .map(|dep| {
+                    let dep = dep.trim();
+                    match dep.strip_prefix("NEW:") {
+                        Some(label) => by_label
+                            .get(label)
+                            .map(|id| (*id).to_string())
+                            .unwrap_or_else(|| dep.to_string()),
+                        None => dep.to_string(),
+                    }
+                })
+                .collect();
+            lines.push(format!("{indent}deps: {}", deps.join(", ")));
+            continue;
         }
         lines.push(line.to_string());
     }
@@ -1682,6 +1741,49 @@ mod tests {
     const HEADER: &str = "<!-- gear-plan project=p base=0 -->\n";
 
     #[test]
+    fn a_new_block_can_carry_a_label_and_the_rewrite_names_its_id() {
+        let text = format!(
+            "{HEADER}# Queue\n## NEW:core [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n## NEW [must] lane=heat\ngoal: B\naccept: b\ndeps: NEW:core\n"
+        );
+        let plan = parse(&text).unwrap();
+        assert_eq!(plan.queue[0].label.as_deref(), Some("core"));
+        assert_eq!(plan.queue[1].label, None);
+        let rewritten = rewrite_applied(
+            &text,
+            2,
+            &["T-1".to_string(), "T-2".to_string()],
+            &[],
+            &[("core".to_string(), "T-1".to_string())],
+            &[],
+        );
+        assert!(rewritten.contains("## T-1 [must] lane=heat"), "{rewritten}");
+        assert!(rewritten.contains("## T-2 [must] lane=heat"), "{rewritten}");
+        assert!(rewritten.contains("deps: T-1"), "{rewritten}");
+        assert!(!rewritten.contains("NEW"), "{rewritten}");
+    }
+
+    #[test]
+    fn a_label_is_lowercase_letters_digits_and_dashes() {
+        let err = detail_of(&format!(
+            "{HEADER}# Queue\n## NEW:Core [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"
+        ));
+        assert!(err.contains("lowercase"), "{err}");
+        let err = detail_of(&format!(
+            "{HEADER}# Queue\n## NEW: [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"
+        ));
+        assert!(err.contains("needs a label"), "{err}");
+    }
+
+    #[test]
+    fn two_blocks_with_one_label_are_refused() {
+        let err = detail_of(&format!(
+            "{HEADER}# Queue\n## NEW:core [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n## NEW:core [must] lane=heat\ngoal: B\naccept: b\ndeps: -\n"
+        ));
+        assert!(err.contains("core"), "{err}");
+        assert!(err.contains("two blocks"), "{err}");
+    }
+
+    #[test]
     fn a_hold_takes_a_date() {
         let plan = parse(&format!(
             "{HEADER}# Queue\n## T-1 [must]\nstate: hold until=2026-11-18\n"
@@ -1707,8 +1809,14 @@ mod tests {
         let text = format!(
             "{HEADER}# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: T-1\n\n# Verdicts\n- T-9 attempt=1 contract=1 candidate=abc pass evidence=x\n\n# Staff\n- hold heat reason=test\n"
         );
-        let rewritten =
-            rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()], &[], &[]);
+        let rewritten = rewrite_applied(
+            &text,
+            7,
+            &["T-1".to_string(), "T-2".to_string()],
+            &[],
+            &[],
+            &[],
+        );
         assert!(
             rewritten.starts_with("<!-- gear-plan project=p base=7 -->"),
             "{rewritten}"
@@ -1758,7 +1866,7 @@ mod tests {
             "{HEADER}# Staff\n- remerge T-12\n- hold heat reason=test\n\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"
         );
         // The remerge line was used (line 3), the hold line was not.
-        let rewritten = rewrite_applied(&text, 2, &[], &[3], &[]);
+        let rewritten = rewrite_applied(&text, 2, &[], &[3], &[], &[]);
         assert!(!rewritten.contains("remerge"), "{rewritten}");
         assert!(rewritten.contains("- hold heat reason=test"), "{rewritten}");
         assert!(
@@ -1768,7 +1876,7 @@ mod tests {
 
         // A section that keeps nothing goes with its lines: no empty section
         // and no second one.
-        let rewritten = rewrite_applied(&text, 2, &[], &[3, 4], &[]);
+        let rewritten = rewrite_applied(&text, 2, &[], &[3, 4], &[], &[]);
         assert!(!rewritten.contains("# Staff"), "{rewritten}");
         assert!(!rewritten.contains("remerge"), "{rewritten}");
         assert!(!rewritten.contains("hold heat"), "{rewritten}");
@@ -1779,7 +1887,7 @@ mod tests {
     #[test]
     fn a_verdicts_section_at_the_end_leaves_no_tail() {
         let text = format!("{HEADER}# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc fail rework=\"x\"\n");
-        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()], &[], &[]);
+        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()], &[], &[], &[]);
         assert!(rewritten.ends_with("deps: -\n"), "{rewritten:?}");
         assert!(!rewritten.contains("Verdicts"), "{rewritten}");
     }
@@ -1793,7 +1901,14 @@ mod tests {
             "{HEADER}# Goal\nthe goal\n\n# Milestone M1: one\ndone: m1\nbar: b1\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\ndeps: -\n\n# Decisions\n- a note\n"
         );
         let block = "# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\nstation S1: the first step needs it\n";
-        let rewritten = rewrite_applied(&text, 3, &["T-1".to_string()], &[], &[block.to_string()]);
+        let rewritten = rewrite_applied(
+            &text,
+            3,
+            &["T-1".to_string()],
+            &[],
+            &[],
+            &[block.to_string()],
+        );
         let os = rewritten
             .find("# Milestone M2: two")
             .expect("the block is there");
@@ -1830,7 +1945,7 @@ mod tests {
             "{HEADER}# Goal\nthe goal\n\n# Milestone M1: one\ndone: m1\nbar: b1\neta: 1h\n"
         );
         let block = "# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\n";
-        let rewritten = rewrite_applied(&text, 2, &[], &[], &[block.to_string()]);
+        let rewritten = rewrite_applied(&text, 2, &[], &[], &[], &[block.to_string()]);
         assert!(
             rewritten.ends_with("eta: 1h\n\n# Milestone M2: two\ndone: m2\nbar: b2\neta: 2h\n"),
             "{rewritten:?}"

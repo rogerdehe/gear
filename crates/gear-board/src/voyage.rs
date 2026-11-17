@@ -100,12 +100,7 @@ impl VoyageReport {
                 .unwrap_or_default(),
         };
         vec![
-            format!(
-                "Voyage {} {} · done: {}{waits}",
-                self.milestone,
-                self.title,
-                self.done.as_deref().unwrap_or("-")
-            ),
+            format!("Voyage {} {}{waits}", self.milestone, self.title),
             format!(
                 "  elapsed {} / eta {}",
                 minutes(self.elapsed_min),

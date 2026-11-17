@@ -17,8 +17,8 @@ profile = "claude"
 
 [[lanes]]
 name = "hull"
-duty = "M7.3 engine merge path (merge.rs, parallel.rs, review.rs), and since 2026-11-17 05:00 the CLI and the skill"
-owns = ["crates/gear-engine/src/merge.rs", "crates/gear-engine/src/parallel.rs", "crates/gear-engine/src/review.rs", "crates/gear-cli/", "skills/"]
+duty = "M7.3 engine merge path (merge.rs, parallel.rs, review.rs)"
+owns = ["crates/gear-engine/src/merge.rs", "crates/gear-engine/src/parallel.rs", "crates/gear-engine/src/review.rs"]
 charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
 kind = "pi"
 profile = "pi"
@@ -28,8 +28,8 @@ models = [
 
 [[lanes]]
 name = "mast"
-duty = "M7.3 config, shared git helpers, plan checks, the reclaim and records (finished.rs), the model speed record, docs"
-owns = ["crates/gear-engine/src/finished.rs", "crates/gear-app/", "crates/gear-model/", "crates/gear-herdr/", "crates/gear-store/", "crates/gear-board/", "crates/gear-forge/", "crates/gear-usage/", "docs/", "README.md"]
+duty = "M7.3 config, shared git helpers, plan checks, the reclaim and records (finished.rs), the model speed record, the CLI, skill and docs"
+owns = ["crates/gear-engine/src/finished.rs", "crates/gear-engine/src/restart.rs", "crates/gear-engine/src/quota.rs", "crates/gear-engine/tests/it/upgrade_contract.rs", "crates/gear-app/", "crates/gear-model/", "crates/gear-cli/", "skills/", "crates/gear-herdr/", "crates/gear-store/", "crates/gear-board/", "crates/gear-forge/", "crates/gear-usage/", "docs/", "README.md"]
 charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
 kind = "pi"
 profile = "pi"
