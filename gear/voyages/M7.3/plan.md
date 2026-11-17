@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1302 -->
+<!-- gear-plan project=gear base=1304 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 5h
 depart: now
 
 # Decisions
+- station M-9009: keep course | why: 12 done at 97m, pace 0.25x, projected 118m from departure; both lanes busy
 - 2026-11-17 note: T-696's packet named a review.rs `on_integration` that does not exist (it is plan.rs's, done in T-697); the item is dropped from T-696. The CLI and skill go back to mast with T-700, T-704 and T-705, since mast ran dry and hull still holds T-693's rework and T-694 | why: M-8988 hull looped 55 min on the wrong name; M-8987 mast idle
 - station M-8986: keep course | why: 9 done at 82m, pace 0.26x, projected 109m from departure; both lanes busy
 - station M-8978: keep course | why: 75m in, pace 0.22x, projected 102m from departure against the 5h eta; both lanes busy
@@ -130,4 +131,10 @@ deps: -
 goal: A new block can be named so another new block depends on it without guessing its id. (a) crates/gear-app/src/draft.rs `parse_block_header`: the header id is `NEW` or `NEW:<label>` (label: lowercase letters, digits and `-`); add `pub label: Option<String>` to `QueueItem`; two blocks with one label in a file are refused with the line. (b) crates/gear-app/src/plan.rs, before the loop that refuses `dep {dep} does not exist and is not created by this draft`: build label -> id from `new_ids` (the id each NEW block gets in this apply) and replace every `NEW:<label>` in an item's `deps` with that id; a label no block carries is refused (`dep NEW:<label> names no block of this draft`). (c) The file rewrite in draft.rs (where `## NEW` headers become `## T-n`, near `ids.next()`): a `## NEW:<label>` header becomes `## T-n` the same way, and each `NEW:<label>` in a `deps:` line becomes its `T-n`. (d) skills/gear/references/captain.md, where `## NEW` blocks are described: one sentence on `## NEW:<label>` and `deps: NEW:<label>`.
 accept: tests: a draft with `## NEW:core` and a second block `deps: NEW:core` applies in one go, the second task's stored deps name the first's id, and the rewritten file shows both ids; an unknown label and a repeated label are refused; a plain `## NEW` block works as before.
 estimate: 20
+deps: -
+
+## T-708 [should] lane=mast milestone=M7.3
+goal: The captain's home page says the voyage's done sentence once. On `gear` (no arguments) the done text is printed three times: the board voyage block (crates/gear-board/src/voyage.rs, the line `Voyage {} {} · done: {}{waits}`), the goal line (crates/gear-board/src/stations.rs, `Your goal, voyage {milestone}: done: ...`, which stays as it is) and the snapshot's voyage line (crates/gear-app/src/home.rs line ~736, `crate::plan::voyage_line(voyage)`). Make voyage.rs's line `Voyage {} {}{waits}` (no done text), and in home.rs print a short line instead of `voyage_line`: `Voyage <milestone> <title> · eta <eta> · bar <first word of the bar>`. `plan::voyage_line` and its other callers (time.rs, plan.rs) do not change.
+accept: a home test: the captain's page carries the done sentence exactly once (in the goal line); the board's own voyage view still shows the voyage name and its clock; existing home and board tests pass with their expected texts updated.
+estimate: 15
 deps: -
