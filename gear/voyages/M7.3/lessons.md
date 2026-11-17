@@ -1,3 +1,4 @@
 # M7.3 lessons
 
 - **A packet names only a function the captain found in that file.** T-696's packet named a `review.rs` `on_integration` that lives in `plan.rs`; a flash lane searched for it for 55 minutes. T-693's fallback named an unfilled template as the goal. Before a packet names a file, function or value, grep it in that file and read the line.
+- **A packet that changes printed text names every test that asserts it, in every crate.** T-708 shortened the home page's voyage line; its packet named home and board tests, and gear-engine's upgrade_contract.rs, outside the lane's files, turned the merge gate red. Before the packet, grep `crates/` for the text being changed and give the lane those files.

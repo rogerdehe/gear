@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1308 -->
+<!-- gear-plan project=gear base=1309 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -9,6 +9,7 @@ eta: 5h
 depart: now
 
 # Decisions
+- 2026-11-17 note: T-708's merge gate failed on gear-engine's upgrade_contract.rs, a home page assertion outside mast's files; a carrier task on T-708's candidate fixes it and T-708 is carried by it | why: M-9044/M-9045; the packet named only home and board tests, not every crate that asserts the page
 - station M-9036: keep course | why: 15 done at 112m, pace 0.25x, projected 133m from departure; hull on T-696 then T-693 rework and T-694, mast on its backlog tasks
 - station M-9009: keep course | why: 12 done at 97m, pace 0.25x, projected 118m from departure; both lanes busy
 - 2026-11-17 note: T-696's packet named a review.rs `on_integration` that does not exist (it is plan.rs's, done in T-697); the item is dropped from T-696. The CLI and skill go back to mast with T-700, T-704 and T-705, since mast ran dry and hull still holds T-693's rework and T-694 | why: M-8988 hull looped 55 min on the wrong name; M-8987 mast idle
@@ -138,6 +139,7 @@ deps: -
 goal: The captain's home page says the voyage's done sentence once. On `gear` (no arguments) the done text is printed three times: the board voyage block (crates/gear-board/src/voyage.rs, the line `Voyage {} {} · done: {}{waits}`), the goal line (crates/gear-board/src/stations.rs, `Your goal, voyage {milestone}: done: ...`, which stays as it is) and the snapshot's voyage line (crates/gear-app/src/home.rs line ~736, `crate::plan::voyage_line(voyage)`). Make voyage.rs's line `Voyage {} {}{waits}` (no done text), and in home.rs print a short line instead of `voyage_line`: `Voyage <milestone> <title> · eta <eta> · bar <first word of the bar>`. `plan::voyage_line` and its other callers (time.rs, plan.rs) do not change.
 accept: a home test: the captain's page carries the done sentence exactly once (in the goal line); the board's own voyage view still shows the voyage name and its clock; existing home and board tests pass with their expected texts updated.
 estimate: 15
+carried-by: T-712
 deps: -
 
 ## T-709 [should] lane=mast milestone=M7.3
@@ -157,3 +159,10 @@ goal: A Claude lane or reviewer whose plan limit is spent is seen as out of quot
 accept: tests: a claude lane whose session log carries a rejected `quotaLimits` record with a future reset is treated as out of quota after its confirm rounds (parked or switched as its policy says); one whose record's reset has passed is not; a pi lane is unaffected.
 estimate: 20
 deps: -
+
+## T-712 [must] lane=mast milestone=M7.3
+goal: Carry T-708 onto dev: its merge gate failed on crates/gear-engine/tests/it/upgrade_contract.rs (line ~71 asserts the home page contains `Voyage M5 the next voyage · done: it sails`, the line T-708 shortened). Start your branch from T-708's candidate 61fb9235f2faab7729a34404c459f63068e32d07 (`git switch -c <your task branch> 61fb9235f2faab7729a34404c459f63068e32d07`), change that assertion to the short line T-708's home page now prints for that voyage (`Voyage M5 the next voyage` with its eta and bar as home.rs writes them) and check the done sentence still appears once through the goal line, then grep crates/ for any other test asserting `· done: ` on the home page and fix it the same way.
+accept: `make check CRATE=gear-engine TESTS='test(upgrade)'` passes; `make check CRATE=gear-app` passes; the diff touches only test files.
+estimate: 10
+deps: -
+
