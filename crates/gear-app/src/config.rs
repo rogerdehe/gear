@@ -69,6 +69,7 @@ impl ProjectConfig {
             integration: self.conventions.integration.clone(),
             release: self.conventions.release.clone(),
             gate: self.conventions.gate.clone(),
+            merge_method: self.conventions.merge_method,
             voyage_dir: self.conventions.voyage_dir.clone(),
             setup: self.setup(),
             github: self.github.as_ref().and_then(GithubSection::resolved),
@@ -169,6 +170,9 @@ impl ProjectConfig {
                 .gate
                 .clone()
                 .unwrap_or_else(|| self.conventions.gate.clone()),
+            // A `[[repos]]` entry never overrides the merge method (M7.3):
+            // the project's `[conventions]` names it.
+            merge_method: self.conventions.merge_method,
             voyage_dir: self.conventions.voyage_dir.clone(),
             setup: self.setup(),
             // A repo's own `[github]`, and only that (T-79): a child repo
@@ -438,6 +442,10 @@ pub struct Repo {
     pub release: String,
     /// The gate that runs in this repo before a merge.
     pub gate: String,
+    /// How a task's merge lands on the integration branch (M7.3): the
+    /// project's `[conventions].merge_method`, which a `[[repos]]` entry
+    /// cannot override.
+    pub merge_method: MergeMethod,
     /// The project's voyage folder template (`[conventions].voyage_dir`, T-257
     /// with `{project}` and `{milestone}`): a merge that changes only reports
     /// in it needs no gate (T-573).
@@ -574,6 +582,10 @@ pub struct Conventions {
     /// `{project}`, `{task}` and `{source}` filled in. Default
     /// `merge({task}): {source}`.
     pub merge_message: String,
+    /// How a task's merge lands on the integration branch (M7.3): `squash`
+    /// (the default) lands one commit carrying the task's goal and trailers;
+    /// `merge` keeps today's merge commits.
+    pub merge_method: MergeMethod,
     /// The message of a reviewer's commit (T-299), a template with `{project}`,
     /// `{task}`, `{attempt}` and `{what}` filled in. Default
     /// `review({task}): {what}`.
@@ -619,6 +631,7 @@ impl Default for Conventions {
             remote: gear_model::layout::REMOTE.to_string(),
             voyage_dir: gear_model::layout::VOYAGE_DIR.to_string(),
             merge_message: gear_model::commit::MERGE_MESSAGE.to_string(),
+            merge_method: MergeMethod::Squash,
             review_message: gear_model::commit::REVIEW_MESSAGE.to_string(),
             plan_message: gear_model::commit::PLAN_MESSAGE.to_string(),
             scratch_dir: None,
@@ -3116,5 +3129,48 @@ gate = "make test"
             voyage_label(&github, "carthage", "M2").as_deref(),
             Some("voyage/carthage/M2")
         );
+    }
+
+    // ---- M7.3: the merge method ------------------------------------------
+
+    /// The harbor config with `extra` appended to its `[conventions]`.
+    fn conventions_config(extra: &str) -> String {
+        format!(
+            "{}\n{extra}",
+            harbor_config(std::path::Path::new("/repo"), None)
+        )
+    }
+
+    #[test]
+    fn the_merge_method_defaults_to_squash_and_reaches_the_repo() {
+        let cfg = parse(&conventions_config("")).unwrap();
+        assert_eq!(cfg.conventions.merge_method, MergeMethod::Squash);
+        assert_eq!(cfg.root_repo().merge_method, MergeMethod::Squash);
+        assert_eq!(cfg.repos()[0].merge_method, MergeMethod::Squash);
+    }
+
+    #[test]
+    fn the_merge_method_parses_both_values() {
+        let squash = parse(&conventions_config("merge_method = \"squash\"")).unwrap();
+        assert_eq!(squash.conventions.merge_method, MergeMethod::Squash);
+        assert_eq!(squash.root_repo().merge_method, MergeMethod::Squash);
+
+        let merge = parse(&conventions_config("merge_method = \"merge\"")).unwrap();
+        assert_eq!(merge.conventions.merge_method, MergeMethod::Merge);
+        assert_eq!(merge.root_repo().merge_method, MergeMethod::Merge);
+    }
+
+    #[test]
+    fn a_repo_entry_takes_the_project_merge_method() {
+        let cfg = parse(&format!(
+            "{}\n\n[[repos]]\nname = \"api\"\npath = \"crates/api\"\n",
+            conventions_config("merge_method = \"merge\"")
+        ))
+        .unwrap();
+        assert_eq!(validate(&cfg), vec![], "the entry is valid");
+        let repos = cfg.repos();
+        assert_eq!(repos.len(), 2, "the root and the entry");
+        assert_eq!(repos[1].name, "api");
+        assert_eq!(repos[1].merge_method, MergeMethod::Merge);
     }
 }

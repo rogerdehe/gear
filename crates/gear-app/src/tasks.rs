@@ -1135,6 +1135,11 @@ fn queue_merge(
             )
         })?,
     };
+    // M7.3: the squash's subject names the task's goal, so the op carries it.
+    let goal = tx
+        .get_contract(project, &task, task_row.contract_version)?
+        .map(|contract| contract.goal)
+        .unwrap_or_default();
     let op = tx.insert_op(&NewOp {
         project: project.to_string(),
         seat: anchor.id,
@@ -1149,6 +1154,7 @@ fn queue_merge(
             "candidate": attempt_row.candidate,
             "review": review,
             "keep_branch": feature_branch.is_some(),
+            "goal": goal,
         }),
         created: now,
     })?;

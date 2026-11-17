@@ -2,7 +2,7 @@
 
 use gear_app::config::{
     departs_at, hours_end, hours_next_start, off_hours_until, parse, validate, ConfigIssue,
-    Conventions, Health, Models, QuotaPolicy, Repo, Timing, WaitPolicy,
+    Conventions, Health, MergeMethod, Models, QuotaPolicy, Repo, Timing, WaitPolicy,
 };
 use gear_model::ErrorCode;
 
@@ -94,6 +94,8 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             // T-299: the commit messages are configuration too; the fixture
             // names none, so GEAR's own form stands.
             merge_message: "merge({task}): {source}".into(),
+            // M7.3: a task's merge lands as one squashed commit by default.
+            merge_method: MergeMethod::Squash,
             review_message: "review({task}): {what}".into(),
             plan_message: "{milestone}: {what}".into(),
             // T-413: no scratch directory named; the seat's worktree holds it.
@@ -1067,6 +1069,7 @@ fn a_project_without_repos_has_only_the_root_repo() {
             integration: "dev".into(),
             release: "main".into(),
             gate: "make test".into(),
+            merge_method: MergeMethod::Squash,
             voyage_dir: gear_model::layout::VOYAGE_DIR.into(),
             setup: None,
             github: None,
