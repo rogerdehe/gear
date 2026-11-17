@@ -281,7 +281,19 @@ pub fn apply_quota_policy_with(
         //    from before (after a model switch the old limit line stays in the
         //    tail) is not a new fact, and a working agent is never parked on
         //    screen text (M-266): only a stopped agent counts.
-        let quota = obs.flags.contains(&ScreenFlag::Quota) && obs.idle;
+        // T-711: a Claude seat whose plan limit is spent says so in its own
+        // session log (`quotaLimits` rejected), with no status line. A stop
+        // whose reset has passed is over.
+        let log_stop = if profile.usage_log.as_deref() == Some("claude-jsonl") {
+            obs.session
+                .as_deref()
+                .filter(|session| !session.trim().is_empty())
+                .and_then(gear_usage::claude_limit_stop)
+                .filter(|stop| stop.resets_at.is_none_or(|reset| reset > now))
+        } else {
+            None
+        };
+        let quota = (obs.flags.contains(&ScreenFlag::Quota) && obs.idle) || log_stop.is_some();
         let (ticks, quota_start) = count_quota_tick(store, &seat.id, quota, now)?;
         // A provider error is a signal too (§9.2): the source tells a spent
         // quota from an error, and the error is not a quota stop.
@@ -396,6 +408,7 @@ pub fn apply_quota_policy_with(
                     seat,
                     current.as_deref(),
                     Some(obs),
+                    log_stop.as_ref().and_then(|stop| stop.resets_at),
                     now,
                     codex_session.as_deref(),
                 )?;
@@ -459,7 +472,10 @@ pub fn apply_quota_policy_with(
                     .and_then(|screen| gear_usage::reset_from_text(screen, now));
                 let (until, reset) = match from_screen {
                     Some(reset) => (reset + 60, "reset read from the screen"),
-                    None => (now + hours * 3600, "no reset on the screen: quota_reset_h"),
+                    None => match log_stop.as_ref().and_then(|stop| stop.resets_at) {
+                        Some(reset) => (reset, "reset read from the session log"),
+                        None => (now + hours * 3600, "no reset on the screen: quota_reset_h"),
+                    },
                 };
                 park(store, seat, current.as_deref(), until, now)?;
                 // T-295 v2: a `wait`-policy park writes a wait, so the reset
@@ -598,6 +614,7 @@ fn fallback_reset(
     seat: &SeatRow,
     left: Option<&str>,
     obs: Option<&SeatObs>,
+    log_reset: Option<Ts>,
     now: Ts,
     codex_session: Option<&str>,
 ) -> GearResult<Ts> {
@@ -617,6 +634,10 @@ fn fallback_reset(
         .and_then(|screen| gear_usage::reset_from_text(screen, now))
     {
         return Ok(reset + 60);
+    }
+    // T-711: the session log's own reset is the reset, not quota_reset_h.
+    if let Some(reset) = log_reset {
+        return Ok(reset);
     }
     Ok(now + i64::from(config.models.quota_reset_h.max(1)) * 3600)
 }
@@ -2831,6 +2852,110 @@ quota_reset_h = {reset_h}
                     .map(str::to_string)
             })
             .collect()
+    }
+
+    /// T-711: the same project with its lane on claude, whose profile reads
+    /// the plan limit from the session log.
+    fn config_claude(chain: &str, policy: &str) -> String {
+        config_full(chain, policy, "keep", 5)
+            .replace("kind = \"opencode\"", "kind = \"claude\"")
+            .replace("profile = \"opencode\"", "profile = \"claude\"")
+    }
+
+    /// A Claude session log whose last assistant record is a rejected
+    /// `quotaLimits` record, with `resets_at` when given. Returns its path,
+    /// which the seat's observation carries as its session.
+    fn claude_stop_file(dir: &std::path::Path, resets_at: Option<i64>) -> String {
+        let limits = match resets_at {
+            Some(at) => {
+                format!(r#"{{"status":"rejected","rateLimitType":"five_hour","resetsAt":{at}}}"#)
+            }
+            None => r#"{"status":"rejected","rateLimitType":"five_hour"}"#.to_string(),
+        };
+        let path = dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            format!("{{\"type\":\"assistant\",\"quotaLimits\":{limits}}}\n"),
+        )
+        .unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// One quota tick with the seat's session log at `session` (T-711).
+    fn tick_quota_session(
+        store: &mut Store,
+        herdr: &mut FakeHerdr,
+        cfg: &EngineCfg,
+        session: &str,
+        now: Ts,
+    ) -> QuotaReport {
+        let seat = lane_seat(store);
+        let mut obs = observed(&seat, false);
+        obs[0].session = Some(session.to_string());
+        apply_quota_policy(store, herdr, cfg, &cfg.profiles, "p", &obs, now).unwrap()
+    }
+
+    #[test]
+    fn a_claude_lane_whose_plan_limit_is_spent_is_parked_at_the_logs_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let reset = T0 + 3600;
+        let session = claude_stop_file(dir.path(), Some(reset));
+        let mut store = world_kind(
+            &config_claude(r#""claude-a", "claude-b""#, "wait"),
+            "claude",
+        );
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "claude", gear_herdr::AgentStatus::Idle);
+
+        tick_quota_session(&mut store, &mut herdr, &cfg(), &session, T0 + 10);
+        let report = tick_quota_session(&mut store, &mut herdr, &cfg(), &session, T0 + 20);
+
+        assert_eq!(report.events.len(), 1, "{:?}", report.events);
+        assert!(
+            report.events[0].contains("policy wait"),
+            "{:?}",
+            report.events
+        );
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Parked);
+        let wait = load_wait(&mut store, "p:heat").unwrap().unwrap();
+        assert_eq!(wait.until, reset, "the log's reset, not quota_reset_h");
+        assert!(exits(&herdr).is_empty(), "waited, not restarted");
+    }
+
+    #[test]
+    fn a_claude_stop_whose_reset_has_passed_is_not_out_of_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = claude_stop_file(dir.path(), Some(T0 - 10));
+        let mut store = world_kind(
+            &config_claude(r#""claude-a", "claude-b""#, "wait"),
+            "claude",
+        );
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "claude", gear_herdr::AgentStatus::Idle);
+
+        tick_quota_session(&mut store, &mut herdr, &cfg(), &session, T0 + 10);
+        let report = tick_quota_session(&mut store, &mut herdr, &cfg(), &session, T0 + 20);
+
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Active);
+    }
+
+    #[test]
+    fn a_pi_lane_is_unaffected_by_a_claude_session_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = claude_stop_file(dir.path(), Some(T0 + 3600));
+        let mut store = world_kind(&config_pi(r#""pi-a", "pi-b""#, "wait", "keep"), "pi");
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "pi", gear_herdr::AgentStatus::Idle);
+
+        tick_quota_session(&mut store, &mut herdr, &cfg(), &session, T0 + 10);
+        let report = tick_quota_session(&mut store, &mut herdr, &cfg(), &session, T0 + 20);
+
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Active);
     }
 
     #[test]
