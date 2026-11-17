@@ -29,7 +29,7 @@ models = [
 [[lanes]]
 name = "mast"
 duty = "M7.3 config, shared git helpers, plan checks, the reclaim and records (finished.rs), the model speed record, the CLI, skill and docs"
-owns = ["crates/gear-engine/src/finished.rs", "crates/gear-app/", "crates/gear-model/", "crates/gear-cli/", "skills/", "crates/gear-herdr/", "crates/gear-store/", "crates/gear-board/", "crates/gear-forge/", "crates/gear-usage/", "docs/", "README.md"]
+owns = ["crates/gear-engine/src/finished.rs", "crates/gear-engine/src/restart.rs", "crates/gear-app/", "crates/gear-model/", "crates/gear-cli/", "skills/", "crates/gear-herdr/", "crates/gear-store/", "crates/gear-board/", "crates/gear-forge/", "crates/gear-usage/", "docs/", "README.md"]
 charter = """You run on a flash model. Implement the packet exactly as written, in the files it names; never design, widen or reinterpret it. When the packet is unclear, contradicts the code, or cannot be done as written, ask the captain with `gear send --kind question` and give a default, instead of guessing."""
 kind = "pi"
 profile = "pi"

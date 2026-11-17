@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1304 -->
+<!-- gear-plan project=gear base=1305 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -136,5 +136,11 @@ deps: -
 ## T-708 [should] lane=mast milestone=M7.3
 goal: The captain's home page says the voyage's done sentence once. On `gear` (no arguments) the done text is printed three times: the board voyage block (crates/gear-board/src/voyage.rs, the line `Voyage {} {} · done: {}{waits}`), the goal line (crates/gear-board/src/stations.rs, `Your goal, voyage {milestone}: done: ...`, which stays as it is) and the snapshot's voyage line (crates/gear-app/src/home.rs line ~736, `crate::plan::voyage_line(voyage)`). Make voyage.rs's line `Voyage {} {}{waits}` (no done text), and in home.rs print a short line instead of `voyage_line`: `Voyage <milestone> <title> · eta <eta> · bar <first word of the bar>`. `plan::voyage_line` and its other callers (time.rs, plan.rs) do not change.
 accept: a home test: the captain's page carries the done sentence exactly once (in the goal line); the board's own voyage view still shows the voyage name and its clock; existing home and board tests pass with their expected texts updated.
+estimate: 15
+deps: -
+
+## T-709 [should] lane=mast milestone=M7.3
+goal: A restart request has its own key. Today `- restart <lane|reviewer>` writes meta `engine.restart.<seat>` = `{"at":…}` (crates/gear-app/src/plan.rs, the `tx.set_meta(&format!("engine.restart.{seat_id}"), …)` near line 3735), and crates/gear-engine/src/restart.rs uses the same key for its restart plan (`plan_key`, line ~1943), so a request applied while a plan is pending overwrites the plan mid-switch (M7.1 T-665). Write and read the request under `engine.restart-request.<seat>`: plan.rs writes it; restart.rs reads and clears it where it reads the flag today (line ~327 and the consume at ~361, and drop the comment that says the flag and the plan share the key); `plan_key` stays `engine.restart.<seat>`. A request found under the old key with an `at` field and no plan fields is read once as a request, so one written before the upgrade is not lost.
+accept: tests: a restart request applied while a restart plan is pending leaves the plan as it was and runs after it; a request on an idle lane restarts it as before; an old-key request is honored once. Update the restart.rs tests that set `engine.restart.p:heat` to `{"at":…}` to the new key.
 estimate: 15
 deps: -
