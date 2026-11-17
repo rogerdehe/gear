@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1318 -->
+<!-- gear-plan project=gear base=1319 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -9,6 +9,14 @@ eta: 5h
 depart: now
 
 # Decisions
+- station M-9109: land | why: all 22 M7.3 tasks are done and merged on dev; the done clauses are met below; released as v0.7.32, live on the three engines
+- done (1): met | evidence: T-691 (merge_method config, squash_message), T-693 (prepare_merge squashes after the merge loop, trailers, train and batch one commit per task; empty goal gives a bare `T-n`); merge_method = "merge" keeps the merge commit (T-693 test); gate 2891 passed
+- done (2): met | evidence: T-694 (feature replay of its own commits, the review commit folded into the last, conflict falls back to one squash), T-695 (bisect and the feature members by Gear-Task trailer)
+- done (3): met | evidence: T-692 (base::landed_in, adds_nothing, added_paths), T-696 (merge restart, lost scan, carried tasks, parallel check), T-697 (plan check, coverage report), T-698 (leftover sweep and release check, each repo's own integration branch), T-700 (departure move)
+- done (4): met | evidence: T-690 (parallel check reads the branch's own commits), T-697 (integrated-by with voyage files only), T-699 (records merge refuses files outside the voyage folder); the records-only clause is met by T-622's rule (an unreleased integration branch is never named, M-8935)
+- done (5): met | evidence: v0.7.32 tagged and merged to main, GitHub Release run succeeded, installed, skills reinstalled for claude, codex, pi, opencode, grok, agy and codex-home, the three engines started 0.7.32, lawrence and goldmine captains told; selina is paused on its codex limit until 23:36 and is told when it returns
+- 2026-11-17 note: the user's mid-voyage clause (6), estimates by model speed, is met: T-701 (model of every attempt), T-702 (speed::measured, calibrated), T-703 (apply warnings and the departure forecast), T-704 (`gear report speed`: hk-dgx-1 DeepSeek V4.1 Flash 640 samples 0.37x, MiniMax 1.13x), T-705 (skill: estimate in agent time); the clause itself did not reach the stored done text although its confirmed line did (backlog)
+- 2026-11-17 note: voyage report: 22 tasks merged in 3h18m against the 5h eta; 6 rework rounds, 4 of them from the captain's packets (T-693 fallback, T-696 nonexistent function, T-694 review commit, T-708 test outside the lane's files) and 2 mechanical (T-693 conflict after T-696, T-698 repo integration); added mid-voyage: clause (6) estimates by model speed (5 tasks) and six backlog items while mast ran dry (T-706 flaky test, T-707 named NEW blocks, T-708 home page done once, T-709 restart request key, T-710 missing seat branch, T-711 Claude lane quota); cut: T-712 (a carrier opened by mistake, replaced by T-708's rework); hot fixes shipped beside the voyage: v0.7.30 (another agent in a seat's pane, records into a missing integration branch), v0.7.31 (a spent codex captain); the gate is at 42 s of its 80 s limit | why: the landing record
 - station M-9105: keep course | why: 180m in, only T-694's rework left and in review; projected 226m from departure, inside the 5h eta
 - station M-9093: keep course | why: 21 done at 157m, T-693 passed, only T-694 left on hull; projected 203m from departure
 - 2026-11-17 note: T-694 no longer waits for T-693's merge: it starts on hull/t693's tip while T-693 is in review, and merges dev before its hand-in | why: M-9088 the voyage stopped with hull idle behind a review
