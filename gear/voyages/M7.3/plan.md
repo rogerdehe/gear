@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1301 -->
+<!-- gear-plan project=gear base=1302 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -124,4 +124,10 @@ deps: -
 goal: Fix the flaky reclaim test. `finished::tests::a_clean_pushed_worktree_is_removed_and_not_named` (crates/gear-engine/src/finished.rs) fails when the finished tests run in parallel in one process (`cargo test -p gear-engine --lib finished::`, and reviewers' `make check CRATE=gear-engine` runs) and passes alone; it cost T-698's review several minutes (F-351). Find what the parallel tests share (a fixed path or name, the process scan of GEAR worktrees, a Herdr call) and give the test its own; never add a retry or a sleep.
 accept: `cargo test -p gear-engine --lib finished::` passes 5 times in a row; the test still asserts the worktree is removed and not named.
 estimate: 15
+deps: -
+
+## T-707 [should] lane=mast milestone=M7.3
+goal: A new block can be named so another new block depends on it without guessing its id. (a) crates/gear-app/src/draft.rs `parse_block_header`: the header id is `NEW` or `NEW:<label>` (label: lowercase letters, digits and `-`); add `pub label: Option<String>` to `QueueItem`; two blocks with one label in a file are refused with the line. (b) crates/gear-app/src/plan.rs, before the loop that refuses `dep {dep} does not exist and is not created by this draft`: build label -> id from `new_ids` (the id each NEW block gets in this apply) and replace every `NEW:<label>` in an item's `deps` with that id; a label no block carries is refused (`dep NEW:<label> names no block of this draft`). (c) The file rewrite in draft.rs (where `## NEW` headers become `## T-n`, near `ids.next()`): a `## NEW:<label>` header becomes `## T-n` the same way, and each `NEW:<label>` in a `deps:` line becomes its `T-n`. (d) skills/gear/references/captain.md, where `## NEW` blocks are described: one sentence on `## NEW:<label>` and `deps: NEW:<label>`.
+accept: tests: a draft with `## NEW:core` and a second block `deps: NEW:core` applies in one go, the second task's stored deps name the first's id, and the rewritten file shows both ids; an unknown label and a repeated label are refused; a plain `## NEW` block works as before.
+estimate: 20
 deps: -

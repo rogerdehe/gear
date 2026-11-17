@@ -3,10 +3,9 @@
 The next voyage's candidates. Its goal is agreed at its kickoff.
 
 ## Candidates
-- **Deps between NEW blocks of one draft** (Prometheus M5, 2026-11-11): a dep can only name an existing `T-n`, so a first apply drops every dep between its new tasks and a second apply adds them back. Let a NEW block carry a label that another NEW block's `deps:` names.
 - **A task registered as already done hits `max_task_min`** (Prometheus M5, 2026-11-11): work done before the voyage was registered was refused for its real estimate (120 > 60); the captain raised the cap. Decide at kickoff whether the cap applies to a captain-alone project at all, since it sizes packets for lanes.
 
-Moved to M7.3 (2026-11-17): squash and rebase, the parallel-change check, the records merge files, integrated-by with voyage files only, the records-only landing. The idle-voyage count was fixed in v0.7.24.
+Moved to M7.3 (2026-11-17): named NEW blocks for deps (T-707), squash and rebase, the parallel-change check, the records merge files, integrated-by with voyage files only, the records-only landing. The idle-voyage count was fixed in v0.7.24.
 
 ## Postponed from M7.1 (2026-11-09: M7.1 closed with these open; check each against the code at kickoff)
 - **The captain's home page prints the voyage's done sentence three times** (M7.1, 2026-11-07): the voyage line, the goal line and the snapshot's voyage line each carry the full `done:` text, so a long goal fills the screen three times over. The page says it once (the goal line) and the other two name the voyage and its clock only.
