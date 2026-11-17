@@ -425,13 +425,10 @@ pub fn reclaim(
             }
             handled.insert(branch);
         }
-        // The release and staging branches outlive every voyage; the
-        // integration branch is the voyage's and goes with it (a departure
-        // cuts it again from the release branch).
+        // The release and staging branches outlive every voyage.
         let keep = [repo.release.as_str(), config.conventions.staging.as_str()];
         for branch in project_branches(&repo.path, &config.conventions.remote, project) {
-            // T-622: the integration branch is handled below: it is deleted
-            // only when its tip is on the release branch.
+            // The integration branch is never deleted (see below).
             if branch.name == repo.integration {
                 continue;
             }
@@ -1379,9 +1376,7 @@ merge_method = "merge"
                 &format!("git remote add origin {}", origin.display()),
             );
             sh(&work, "git push -q origin HEAD:refs/heads/dev");
-            // T-622: the release branch, at the integration branch's tip: the
-            // landing's reclaim deletes the integration branch once it is on
-            // release.
+            // T-622: the release branch, at the integration branch's tip.
             sh(&work, "git push -q origin HEAD:refs/heads/main");
             // The captain's seat branch: pushed at the landing's branch point.
             sh(

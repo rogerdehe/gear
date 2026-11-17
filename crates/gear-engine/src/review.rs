@@ -3252,8 +3252,8 @@ fn start_standby_reviewer(
             let worktree = match opened {
                 Outcome::Ok(worktree) => worktree,
                 Outcome::Refused { code, .. } if code == "worktree_not_found" => {
-                    // T-622: the integration branch a landing's reclaim deleted
-                    // is cut again from the release branch before the worktree.
+                    // T-622: a missing integration branch is cut from the release
+                    // branch before the worktree.
                     if let Err(reason) = crate::onboard::ensure_integration(
                         store,
                         &config.project.id,
@@ -3631,8 +3631,8 @@ fn start_reviewer(
             let worktree = match opened {
                 Outcome::Ok(worktree) => worktree,
                 Outcome::Refused { code, .. } if code == "worktree_not_found" => {
-                    // T-622: the integration branch a landing's reclaim deleted
-                    // is cut again from the release branch before the worktree.
+                    // T-622: a missing integration branch is cut from the release
+                    // branch before the worktree.
                     if let Err(reason) = crate::onboard::ensure_integration(
                         store,
                         &config.project.id,
