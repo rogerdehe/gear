@@ -664,7 +664,7 @@ fn scan(input: &Input) -> Result<Findings, String> {
         // scan (T-431).
         if let Some(candidate) = &task.candidate {
             if let Some(candidate) = tips.revision(candidate) {
-                if ancestor(&input.repo, &candidate, &base_tip)? {
+                if gear_app::base::landed_in(&input.repo, &base_tip, &candidate).unwrap_or(false) {
                     continue;
                 }
             }
@@ -934,9 +934,14 @@ fn ancestor(repo: &Path, from: &str, to: &str) -> Result<bool, String> {
     Ok(answer)
 }
 
-/// The files that changed between two commits: read from git the first time a
-/// scan asks for a pair, and from the cache after that (T-435). A failed read
-/// keeps nothing, so the next scan asks git again.
+/// The files of the commits `to` has that `from` lacks: read from git the
+/// first time a scan asks for a pair, and from the cache after that (T-435).
+/// A failed read keeps nothing, so the next scan asks git again.
+///
+/// The branch's own non-merge commits, not a diff against a merge base
+/// (T-690): a stale or multiple merge base listed files another task had
+/// already landed, so a branch that merged the integration branch after it
+/// took another task's change was said to share that file (M7.1 M-8738).
 fn changed(repo: &Path, from: &str, to: &str) -> Result<BTreeSet<String>, String> {
     let key = (repo.to_path_buf(), from.to_string(), to.to_string());
     if let Some(files) = DIFFS.lock().ok().and_then(|diffs| diffs.get(&key).cloned()) {
@@ -945,13 +950,15 @@ fn changed(repo: &Path, from: &str, to: &str) -> Result<BTreeSet<String>, String
     let output = git(
         repo,
         &[
-            "diff",
+            "log",
+            "--no-merges",
             "--no-ext-diff",
             "--no-textconv",
             "--no-renames",
             "--name-only",
+            "--format=",
             "-z",
-            &format!("{from}...{to}"),
+            &format!("{from}..{to}"),
             "--",
         ],
     )?;
@@ -1376,6 +1383,47 @@ profile = "codex"
         assert_eq!(answers.get(&(path.clone(), dev.clone(), dev)), Some(&true));
     }
 
+    /// T-690: a branch that merged the integration branch after it took
+    /// another task's change to `plan.rs` does not share `plan.rs` (M7.1
+    /// M-8738). Its own commits are its own file; the merged change is the
+    /// integration branch's, and the other branch's `plan.rs` is its own.
+    #[test]
+    fn a_branch_that_merged_the_integration_branch_does_not_share_a_landed_file() {
+        let path = crate::testtmp::temp("gear-parallel-merged-dev").join("repo");
+        std::fs::create_dir_all(&path).unwrap();
+        sh(&path, &["init", "-q", "-b", "dev"]);
+        sh(&path, &["config", "user.name", "test"]);
+        sh(&path, &["config", "user.email", "a@b"]);
+        sh(&path, &["config", "commit.gpgsign", "false"]);
+        sh(&path, &["config", "core.hooksPath", "/dev/null"]);
+        commit(&path, "base", SRC, "base\n");
+        commit(&path, "other", "other.rs", "base\n");
+        // T-1 is cut before the integration branch takes another task's
+        // `plan.rs`, and changes a file of its own.
+        sh(&path, &["switch", "-qc", "heat/t1"]);
+        commit(&path, "heat", "heat.rs", "heat\n");
+        sh(&path, &["switch", "-q", "dev"]);
+        commit(&path, "another task's plan", "plan.rs", "plan\n");
+        // T-2 is cut after it, and changes `plan.rs` itself.
+        sh(&path, &["switch", "-qc", "steady/t2", "dev"]);
+        commit(&path, "steady", "plan.rs", "steady plan\n");
+        // T-1 merges the integration branch, which holds the other change.
+        sh(&path, &["switch", "-q", "heat/t1"]);
+        sh(&path, &["merge", "-q", "--no-ff", "dev", "-m", "merge dev"]);
+        sh(&path, &["switch", "-q", "dev"]);
+
+        let mut store = store(&path);
+        let found = scanned(&mut store, T0);
+        assert!(
+            !found.pairs.contains_key("tasks:T-1:T-2"),
+            "T-1's own commits do not touch plan.rs: {found:?}"
+        );
+        assert!(
+            !found.integration.contains_key("integration:T-1"),
+            "T-1 holds the integration branch's plan.rs, it does not change it: {found:?}"
+        );
+    }
+
     /// A real repository with one feature (T-596): `dev` with the fixture
     /// files, and the feature's branch `p/feature/f-1` cut from it.
     fn feature_repo(name: &str) -> PathBuf {
@@ -1597,6 +1645,46 @@ profile = "codex"
         assert!(
             !found.pairs.contains_key("tasks:T-1:T-2"),
             "read against the remote's feature branch: {found:?}"
+        );
+    }
+
+    /// T-696: a task whose candidate landed in a squashed commit on the
+    /// integration branch is not an open change: the commit names the
+    /// candidate in a trailer, not by ancestry.
+    #[test]
+    fn a_task_squashed_onto_the_integration_branch_is_not_an_open_change() {
+        let path = repo();
+        sh(&path, &["switch", "-q", "dev"]);
+        commit(&path, "dev moves", SRC, "dev moves\n");
+        sh(&path, &["switch", "-q", "steady/t2"]);
+        commit(&path, "steady moves", SRC, "steady src\n");
+        let candidate = sh(&path, &["rev-parse", "heat/t1"]);
+        // The squash: one commit on dev whose message names the candidate.
+        sh(&path, &["switch", "-q", "dev"]);
+        std::fs::write(path.join(SRC), "heat squashed\n").unwrap();
+        sh(&path, &["add", "--", SRC]);
+        sh(
+            &path,
+            &[
+                "commit",
+                "-qm",
+                "T-1: heat",
+                "-m",
+                &format!("Gear-Candidate: {candidate}"),
+            ],
+        );
+        let mut store = store(&path);
+        store_with_candidates(&path, &mut store);
+
+        let found = scanned(&mut store, T0);
+
+        assert!(
+            !found.pairs.contains_key("tasks:T-1:T-2"),
+            "T-1 landed: {found:?}"
+        );
+        assert!(
+            !found.integration.contains_key("integration:T-1"),
+            "T-1 is no open change: {found:?}"
         );
     }
 }

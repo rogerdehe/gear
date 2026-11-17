@@ -70,7 +70,16 @@ fn a_v056_project_upgrades_and_carries_its_voyage_seats_and_items_on() {
     let page = gear_app::home::build(&mut store, &env(), Some(&fp), T0 + 601).unwrap();
     assert!(
         page.text
-            .contains("Voyage M5 the next voyage · done: it sails"),
+            .contains("Voyage M5 the next voyage · eta 2h · bar -"),
+        "{}",
+        page.text
+    );
+    // T-708: the done sentence is on the page once, in the goal line. The
+    // station item in the inbox quotes that goal text, as it always has.
+    let before_inbox = page.text.split("INBOX (").next().unwrap_or_default();
+    assert_eq!(before_inbox.matches("it sails").count(), 1, "{}", page.text);
+    assert!(
+        before_inbox.contains("Your goal, voyage M5: done: it sails"),
         "{}",
         page.text
     );

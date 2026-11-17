@@ -323,9 +323,7 @@ pub fn restart_lanes(
         if seat.role != SeatRole::Lane || seat.state != SeatState::Active {
             continue;
         }
-        let flag = store
-            .read(|tx| tx.get_meta(&format!("engine.restart.{}", seat.id)))?
-            .filter(|value| !value.is_empty());
+        let flag = restart_request(store, &seat.id)?;
         if flag.is_none() {
             continue;
         }
@@ -356,9 +354,9 @@ pub fn restart_lanes(
             args,
             context_window_k: None,
         });
-        // The flag and the plan share the key: consume the flag before the
-        // plan is written, so the plan is not wiped.
-        store.write(|tx| tx.set_meta(&format!("engine.restart.{}", seat.id), ""))?;
+        // The request has its own key (T-709): consume it before the plan is
+        // written, so a pending plan is left as it is.
+        store.write(|tx| tx.set_meta(&format!("engine.restart-request.{}", seat.id), ""))?;
         advance_when(
             store,
             herdr,
@@ -1941,6 +1939,35 @@ fn worktree_path(store: &mut Store, seat: &SeatRow) -> GearResult<Option<String>
 /// The key of a seat's restart plan.
 fn plan_key(seat_id: &str) -> String {
     format!("engine.restart.{seat_id}")
+}
+
+/// The captain's restart request for a seat (T-709): its own key, else an old
+/// `engine.restart.<seat>` value that is a request (`at`, no plan fields), so
+/// a request written before the upgrade is honored once and not lost.
+fn restart_request(store: &mut Store, seat_id: &str) -> GearResult<Option<String>> {
+    let key = format!("engine.restart-request.{seat_id}");
+    if let Some(value) = store
+        .read(|tx| tx.get_meta(&key))?
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Some(value));
+    }
+    let old = plan_key(seat_id);
+    let Some(value) = store
+        .read(|tx| tx.get_meta(&old))?
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&value) else {
+        return Ok(None);
+    };
+    if json.get("at").is_none() || json.get("phase").is_some() {
+        return Ok(None);
+    }
+    // Consume the old key once: the next tick reads the plan there.
+    store.write(|tx| tx.set_meta(&old, ""))?;
+    Ok(Some(value))
 }
 
 fn set_pending(store: &mut Store, seat_id: &str, plan: &Plan) -> GearResult<()> {
@@ -4307,7 +4334,7 @@ switch_grace_min = 10
         let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
         reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
         store
-            .write(|tx| tx.set_meta("engine.restart.p:heat", "{\"at\":1800000000}"))
+            .write(|tx| tx.set_meta("engine.restart-request.p:heat", "{\"at\":1800000000}"))
             .unwrap();
 
         let restarted =
@@ -4326,13 +4353,20 @@ switch_grace_min = 10
             "the wrap-up is sent: {:?}",
             herdr.calls
         );
-        // The flag and the plan share the key: it now holds the plan.
+        // The request was consumed; the plan is in its own key.
+        assert!(
+            store
+                .read(|tx| tx.get_meta("engine.restart-request.p:heat"))
+                .unwrap()
+                .is_none_or(|raw| raw.is_empty()),
+            "the request is consumed"
+        );
         assert!(
             store
                 .read(|tx| tx.get_meta("engine.restart.p:heat"))
                 .unwrap()
                 .is_some_and(|raw| !raw.is_empty()),
-            "the plan is in the key"
+            "the plan is in its key"
         );
 
         let restarted =
@@ -4342,6 +4376,76 @@ switch_grace_min = 10
         let wrap_at = plan.wrap_at;
         advance_pending(&mut store, &mut herdr, &cfg, wrap_at + GRACE);
         assert_eq!(quit_prompts(&herdr), 1, "the old agent is told to quit");
+    }
+
+    /// T-709: a request applied while a restart plan is pending leaves the
+    /// plan as it was and runs after it.
+    #[test]
+    fn a_request_while_a_plan_is_pending_leaves_the_plan_and_runs_after_it() {
+        let dir = dirty_worktree();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        store
+            .write(|tx| tx.set_meta("engine.restart-request.p:heat", "{\"at\":1800000000}"))
+            .unwrap();
+        let restarted =
+            restart_lanes(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        assert_eq!(restarted, vec!["p:heat".to_string()]);
+        let plan = pending(&mut store, "p:heat").unwrap().unwrap();
+        store
+            .write(|tx| tx.set_meta("engine.restart-request.p:heat", "{\"at\":1800000000}"))
+            .unwrap();
+
+        let restarted =
+            restart_lanes(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 2).unwrap();
+        assert!(restarted.is_empty(), "{restarted:?}");
+        assert_eq!(
+            pending(&mut store, "p:heat").unwrap().unwrap(),
+            plan,
+            "the pending plan is untouched"
+        );
+        assert!(
+            store
+                .read(|tx| tx.get_meta("engine.restart-request.p:heat"))
+                .unwrap()
+                .is_some_and(|raw| !raw.is_empty()),
+            "the request waits"
+        );
+
+        // The plan finishes: the request is carried out then.
+        store
+            .write(|tx| tx.set_meta("engine.restart.p:heat", ""))
+            .unwrap();
+        let restarted =
+            restart_lanes(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 3).unwrap();
+        assert_eq!(restarted, vec!["p:heat".to_string()]);
+        assert!(pending(&mut store, "p:heat").unwrap().is_some());
+    }
+
+    /// T-709: a request written before the upgrade under the old key is read
+    /// once as a request, not lost.
+    #[test]
+    fn an_old_key_request_is_honored_once() {
+        let dir = dirty_worktree();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap());
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        store
+            .write(|tx| tx.set_meta("engine.restart.p:heat", "{\"at\":1800000000}"))
+            .unwrap();
+
+        let restarted =
+            restart_lanes(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        assert_eq!(restarted, vec!["p:heat".to_string()]);
+        assert!(
+            store
+                .read(|tx| tx.get_meta("engine.restart.p:heat"))
+                .unwrap()
+                .is_some_and(|raw| !raw.is_empty()),
+            "the plan is in the old key now"
+        );
+        let restarted =
+            restart_lanes(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 2).unwrap();
+        assert!(restarted.is_empty(), "read once: {restarted:?}");
     }
 
     /// T-661: an at-once switch is never downgraded by a later config.

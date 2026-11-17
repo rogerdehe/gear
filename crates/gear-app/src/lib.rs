@@ -32,6 +32,7 @@ pub mod review;
 pub mod seat_branch;
 pub mod seats;
 pub mod skill;
+pub mod speed;
 pub mod standard;
 pub mod station;
 pub mod tasks;

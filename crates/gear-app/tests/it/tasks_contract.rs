@@ -1,6 +1,8 @@
 //! Contract for gear_app::tasks (T-42 start/confirm/submit, T-43 settle; design/06).
 
-use gear_app::tasks::{on_delivery_confirmed, settle, start_attempt, submit_result, Verdict};
+use gear_app::tasks::{
+    attempt_model_key, on_delivery_confirmed, settle, start_attempt, submit_result, Verdict,
+};
 use gear_model::{AttemptState, ErrorCode, SeatRole, TaskState};
 use gear_store::{testing, ContractRow, Store, TaskRow};
 
@@ -93,6 +95,36 @@ fn verdict(pass: bool) -> Verdict {
         integrated_by: None,
         by_seat: "p:captain".into(),
     }
+}
+
+/// M7.3: a started attempt carries the model its seat runs now.
+#[test]
+fn a_started_attempt_carries_the_seats_model() {
+    let mut s = world(&[task("T-1", TaskState::Ready, &[])]);
+    s.write(|tx| {
+        tx.set_meta("engine.model.p:heat", "opencode/big")?;
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0).map(|_| ())
+    })
+    .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_meta(&attempt_model_key("p", "T-1", 1)))
+            .unwrap()
+            .as_deref(),
+        Some("opencode/big")
+    );
+}
+
+/// M7.3: a seat with no model meta writes nothing.
+#[test]
+fn a_started_attempt_of_a_seat_without_a_model_writes_nothing() {
+    let mut s = world(&[task("T-1", TaskState::Ready, &[])]);
+    s.write(|tx| start_attempt(tx, "p", "T-1", "p:heat", 1, T0).map(|_| ()))
+        .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_meta(&attempt_model_key("p", "T-1", 1)))
+            .unwrap(),
+        None
+    );
 }
 
 #[test]
