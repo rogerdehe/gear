@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=1305 -->
+<!-- gear-plan project=gear base=1306 -->
 # Goal
 A merge leaves one commit per gated change and no merge commits: each task lands as one squashed commit on the integration tip, a feature lands by replaying its tasks' commits, and everything in GEAR that asked git "is this merged" still answers right. Shipped as a v0.7.x patch live for every project on this machine.
 
@@ -142,5 +142,11 @@ deps: -
 ## T-709 [should] lane=mast milestone=M7.3
 goal: A restart request has its own key. Today `- restart <lane|reviewer>` writes meta `engine.restart.<seat>` = `{"at":…}` (crates/gear-app/src/plan.rs, the `tx.set_meta(&format!("engine.restart.{seat_id}"), …)` near line 3735), and crates/gear-engine/src/restart.rs uses the same key for its restart plan (`plan_key`, line ~1943), so a request applied while a plan is pending overwrites the plan mid-switch (M7.1 T-665). Write and read the request under `engine.restart-request.<seat>`: plan.rs writes it; restart.rs reads and clears it where it reads the flag today (line ~327 and the consume at ~361, and drop the comment that says the flag and the plan share the key); `plan_key` stays `engine.restart.<seat>`. A request found under the old key with an `at` field and no plan fields is read once as a request, so one written before the upgrade is not lost.
 accept: tests: a restart request applied while a restart plan is pending leaves the plan as it was and runs after it; a request on an idle lane restarts it as before; an old-key request is honored once. Update the restart.rs tests that set `engine.restart.p:heat` to `{"at":…}` to the new key.
+estimate: 15
+deps: -
+
+## T-710 [should] lane=mast milestone=M7.3
+goal: A landing whose seat branch is missing names the captain branches the remote does have. In crates/gear-engine/src/finished.rs `merge_records`, the `Recorded::Missing` arm today resolves the records item with "there is no branch {branch} on the remote" (Lawrence M2: the seat branch was pinned `lawrence/captain/M2`, the captain pushed `lawrence/captain/M1`, and the records were never merged). List the remote's `<project>/captain/*` branches (`git for-each-ref --format=%(refname:short) refs/remotes/<remote>/<project>/captain/`, the `<remote>/` prefix cut). When there are any, open (or keep) the captain item on thread `records:<milestone>` through the existing `tell_records_failed` path with the text `no branch <branch> on <remote>; the remote has <list>: push this voyage's records to <branch>`, and do not resolve; when there are none, resolve as today.
+accept: tests: a landing whose seat branch is missing while `p/captain/M0` is on the remote gets one item naming `p/captain/M0` and nothing is merged; a landing with no captain branch at all resolves as before.
 estimate: 15
 deps: -
