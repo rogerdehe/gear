@@ -2490,17 +2490,81 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
         if !object_held(&repo.path, &config.conventions.remote, candidate) {
             continue;
         }
-        if !crate::base::contains(std::path::Path::new(&repo.path), candidate, &reference)? {
-            return Err(bad(
-                0,
-                format!(
-                    "{task}: the candidate {candidate} is not in {}: a pass may name the task whose merge landed the work only when that work is in the integration branch",
-                    repo.integration
-                ),
-            ));
+        let dir = std::path::Path::new(&repo.path);
+        let landed = crate::base::landed_in(dir, &reference, candidate).map_err(|e| bad(0, e))?;
+        if !landed {
+            // M7.3: an integrated-by pass whose candidate differs from the
+            // integration branch only in the voyage's records is accepted —
+            // the records are the captain's own files, and the work landed.
+            let changed = changed_between(dir, &reference, candidate).map_err(|e| bad(0, e))?;
+            // A candidate that differs in nothing is not the work that landed
+            // (T-205 F4: the same tree with no ancestry is refused); one that
+            // differs only in the voyage's records is.
+            let only_voyage = !changed.is_empty()
+                && changed
+                    .iter()
+                    .all(|path| under_voyage(path, &repo.voyage_dir, &project));
+            if !only_voyage {
+                return Err(bad(
+                    0,
+                    format!(
+                        "{task}: the candidate {candidate} is not in {}: a pass may name the task whose merge landed the work only when that work is in the integration branch",
+                        repo.integration
+                    ),
+                ));
+            }
         }
     }
     Ok(())
+}
+
+/// The paths `git diff --name-only <reference> <candidate>` lists in `dir`.
+fn changed_between(
+    dir: &std::path::Path,
+    reference: &str,
+    candidate: &str,
+) -> Result<Vec<String>, String> {
+    let diffed = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["diff", "--name-only", reference, candidate])
+        .output()
+        .map_err(|error| {
+            format!(
+                "cannot diff {candidate} against {reference} in {}: {error}",
+                dir.display()
+            )
+        })?;
+    if !diffed.status.success() {
+        return Err(format!(
+            "cannot diff {candidate} against {reference} in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&diffed.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&diffed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Whether `path` lies under the project's voyage folder: `voyage_dir` with
+/// `{project}` filled in, `{milestone}` matching any one folder.
+fn under_voyage(path: &str, voyage_dir: &str, project: &str) -> bool {
+    let template = voyage_dir.replace("{project}", project);
+    let Some(at) = template.find("{milestone}") else {
+        return false;
+    };
+    let prefix = &template[..at];
+    let Some(rest) = path.strip_prefix(prefix) else {
+        return false;
+    };
+    let Some((milestone, _)) = rest.split_once('/') else {
+        return false;
+    };
+    !milestone.is_empty()
 }
 
 /// A done line's commit must be on the integration or the release branch
@@ -2797,31 +2861,9 @@ fn on_integration(
             ),
         ));
     }
-    let placed = Command::new("git")
-        .args(["merge-base", "--is-ancestor", candidate, &reference])
-        .current_dir(&repo.path)
-        .output()
-        .map_err(|e| {
-            bad(
-                0,
-                format!(
-                    "cannot place {candidate} against {reference} in {}: {e}",
-                    repo.path
-                ),
-            )
-        })?;
-    match placed.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(bad(
-            0,
-            format!(
-                "cannot place {candidate} against {reference} in {}: {}",
-                repo.path,
-                String::from_utf8_lossy(&placed.stderr).trim()
-            ),
-        )),
-    }
+    let placed = crate::base::landed_in(std::path::Path::new(&repo.path), &reference, candidate)
+        .map_err(|error| bad(0, error))?;
+    Ok(placed)
 }
 
 /// Close the open merge items of a task (T-112: a cancelled task; T-92 F1: a
@@ -6875,5 +6917,107 @@ mod tail_time_tests {
             Some(1793037600 - 3600)
         );
         assert_eq!(parse_rfc3339("tomorrow"), None);
+    }
+}
+
+#[cfg(test)]
+mod integration_check_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// M7.3: a candidate landed by a squash is on the integration branch
+    /// through the `Gear-Candidate` trailer, though its own sha is no
+    /// ancestor; an unrelated commit is not.
+    #[test]
+    fn a_squashed_candidate_is_on_the_integration_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        git(
+            root.path(),
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        );
+        git(
+            root.path(),
+            &["init", "-q", "-b", "dev", work.to_str().unwrap()],
+        );
+        std::fs::write(work.join("base.txt"), "base\n").unwrap();
+        git(&work, &["add", "base.txt"]);
+        git(&work, &["commit", "-q", "-m", "base"]);
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&work, &["push", "-q", "origin", "dev"]);
+        // The candidate on a branch of its own.
+        git(&work, &["checkout", "-q", "-b", "side"]);
+        std::fs::create_dir_all(work.join("src/heat")).unwrap();
+        std::fs::write(work.join("src/heat/x.rs"), "the work\n").unwrap();
+        git(&work, &["add", "src/heat/x.rs"]);
+        git(&work, &["commit", "-q", "-m", "the work"]);
+        let candidate = git(&work, &["rev-parse", "HEAD"]);
+        // The squash on dev names it.
+        git(&work, &["checkout", "-q", "dev"]);
+        git(
+            &work,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                &format!("T-1: the goal\n\nGear-Candidate: {candidate}"),
+            ],
+        );
+        git(&work, &["push", "-q", "origin", "dev"]);
+        let config = crate::config::parse(&format!(
+            r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "{}"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[conventions]
+integration = "dev"
+gate = "make test"
+"#,
+            work.display()
+        ))
+        .unwrap();
+        assert_eq!(on_integration(&config, Some("heat"), &candidate), Ok(true));
+        assert_eq!(on_integration(&config, Some("heat"), "deadbeef"), Ok(false));
     }
 }

@@ -2672,17 +2672,7 @@ impl GitOnIntegration {
         let Some(integration) = integration else {
             return false;
         };
-        std::process::Command::new("git")
-            .args([
-                "-C",
-                &repo.path,
-                "merge-base",
-                "--is-ancestor",
-                sha,
-                &integration,
-            ])
-            .status()
-            .map(|status| status.success())
+        gear_app::base::landed_in(std::path::Path::new(&repo.path), &integration, sha)
             .unwrap_or(false)
     }
 }
@@ -7415,6 +7405,130 @@ path="api"
             !out.contains("T-1 attempt"),
             "the landed one is not listed: {out}"
         );
+    }
+
+    /// M7.3: a candidate landed by a squash is on the integration branch
+    /// through its `Gear-Candidate` trailer, so the coverage report does not
+    /// list it.
+    #[test]
+    fn the_coverage_report_accepts_a_squashed_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        let run = |dir: &std::path::Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        run(
+            root.path(),
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        );
+        run(
+            root.path(),
+            &["init", "-q", "-b", "dev", work.to_str().unwrap()],
+        );
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        run(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        run(&work, &["push", "-q", "origin", "dev"]);
+        // A candidate on a branch of its own, landed by a squash on dev.
+        run(&work, &["checkout", "-q", "-b", "heat/t2"]);
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "the work"]);
+        let candidate = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        let candidate = String::from_utf8_lossy(&candidate.stdout)
+            .trim()
+            .to_string();
+        run(&work, &["checkout", "-q", "dev"]);
+        run(
+            &work,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                &format!("T-2: the goal\n\nGear-Candidate: {candidate}"),
+            ],
+        );
+        run(&work, &["push", "-q", "origin", "dev"]);
+
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = format!(
+                    "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"{}\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\nkind = \"opencode\"\nprofile = \"opencode\"\n",
+                    work.display()
+                );
+                tx.update_project(&project)?;
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-2".into(),
+                    rank: 1,
+                    state: TaskState::Done,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: Some("M6".into()),
+                    required: true,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    project: "p".into(),
+                    task: "T-2".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Accepted,
+                    candidate: Some(candidate.clone()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out =
+            run_report_coverage(&mut store, &env("captain", CAP_PANE), &mut herdr, false).unwrap();
+        assert!(out.contains("1 accepted attempt(s) checked"), "{out}");
+        assert!(
+            out.contains("every candidate is on it"),
+            "the squashed one is not listed: {out}"
+        );
+        assert!(!out.contains("T-2 attempt"), "{out}");
     }
 
     /// T-171: `gear report voyage` is the captain's landing report (design
