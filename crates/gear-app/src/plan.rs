@@ -514,7 +514,10 @@ fn apply_queue(
                         }
                     }
                     Some("ready") => {
-                        if task.state != TaskState::Draft {
+                        // A task that is ready already is a no-op (a plan
+                        // written before v0.7.43 keeps the line after the
+                        // apply that carried it out).
+                        if !matches!(task.state, TaskState::Draft | TaskState::Ready) {
                             return Err(bad(
                                 item.line,
                                 format!(
