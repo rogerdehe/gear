@@ -20,7 +20,7 @@
 //! skipped and an edited line is a new decision.
 
 /// The kinds a decision may have (§7.2).
-pub const KINDS: [&str; 16] = [
+pub const KINDS: [&str; 17] = [
     "scope",
     "cut",
     "split",
@@ -37,6 +37,7 @@ pub const KINDS: [&str; 16] = [
     "station",
     "user",
     "confirmed",
+    "correction",
 ];
 
 /// One decision of the log, as the captain wrote it.
@@ -100,6 +101,29 @@ pub fn parse(line: &str) -> Decision {
             note: false,
         };
     }
+    // A correction of a lane or reviewer keeps its own form:
+    // `<date> correction: <what> -> <what prevents it now | judgment only: why>`.
+    // The right-hand side is kept as `why`; an empty one is kept as none, and
+    // the voyage report flags it.
+    if let Some((head, rest)) = text.split_once(" correction:") {
+        let head = head.trim();
+        if is_date(head) || is_date_time(head) {
+            let (what, prevents) = match rest.split_once("->") {
+                Some((what, prevents)) => (what.trim(), prevents.trim()),
+                None => (rest.trim(), ""),
+            };
+            return Decision {
+                kind: "correction".to_string(),
+                what: what.to_string(),
+                why: (!correction_unanswered(prevents)).then(|| prevents.to_string()),
+                alt: None,
+                changes: None,
+                star,
+                at: head.to_string(),
+                note: false,
+            };
+        }
+    }
     // The structured form: <date> <kind>: <what> | why: … | else: … | changes: …
     let mut parts = text.split(" | ");
     let first = parts.next().unwrap_or_default().trim();
@@ -157,6 +181,16 @@ pub fn parse(line: &str) -> Decision {
         at,
         note: false,
     }
+}
+
+/// Whether the right-hand side of a correction says nothing: empty, or a
+/// `judgment only:` with no reason after it.
+pub fn correction_unanswered(prevents: &str) -> bool {
+    let prevents = prevents.trim();
+    prevents.is_empty()
+        || prevents
+            .strip_prefix("judgment only:")
+            .is_some_and(|why| why.trim().is_empty())
 }
 
 /// A line that is not structured (§7.2): a note, without a star.
@@ -348,6 +382,39 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A correction line is structured: its left side is what was corrected,
+    /// its right side what prevents it now; an empty right side is kept as
+    /// none.
+    #[test]
+    fn a_correction_line_is_structured() {
+        let line = parse(
+            "2026-11-18 correction: room skipped the build -> the lane charter runs npm run build",
+        );
+        assert_eq!(line.kind, "correction");
+        assert!(!line.note);
+        assert_eq!(line.what, "room skipped the build");
+        assert_eq!(
+            line.why.as_deref(),
+            Some("the lane charter runs npm run build")
+        );
+        assert_eq!(line.at, "2026-11-18");
+
+        let timed = parse("★ 2026-11-18 09:30 correction: x -> judgment only: one-off typo");
+        assert_eq!(timed.kind, "correction");
+        assert!(timed.star);
+        assert_eq!(timed.why.as_deref(), Some("judgment only: one-off typo"));
+
+        for empty in [
+            "2026-11-18 correction: reviewer passed a red test ->",
+            "2026-11-18 correction: reviewer passed a red test -> judgment only:",
+            "2026-11-18 correction: reviewer passed a red test",
+        ] {
+            let line = parse(empty);
+            assert_eq!(line.kind, "correction", "{empty}");
+            assert_eq!(line.why, None, "{empty}");
+        }
+    }
 
     /// The published test vectors of sha256.
     #[test]
