@@ -3467,10 +3467,43 @@ fn remove_landed_feature_worktrees(
         let repo = config.repo_of_task(&row);
         let label = feature_merge_label(project, &repo, &feature);
         if let Outcome::Ok(worktree) = herdr.worktree_open(&repo.path, &feature, &label) {
+            // Herdr opens the worktree that has the branch checked out, and
+            // that can be a lane's own worktree: the feature's integration
+            // task works the feature's branch there (MissHerAI M2.1,
+            // 2026-11-18: T-73 and T-71 landed and the media and room lanes
+            // lost their worktrees and workspaces). Only the merge worktree
+            // is GEAR's to remove; a seat's recorded worktree never is.
+            if seat_worktree(store, project, &repo.path, &worktree.path)? {
+                continue;
+            }
             let _ = herdr.worktree_remove(&worktree.workspace_id);
         }
     }
     Ok(())
+}
+
+/// Whether `path` is a worktree a seat of the project records as its own.
+fn seat_worktree(store: &mut Store, project: &str, repo: &str, path: &str) -> GearResult<bool> {
+    let same = |recorded: &str| {
+        let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+        recorded == path || canon(recorded) == canon(path)
+    };
+    store.read(|tx| {
+        for seat in tx.seats_of_project(project)? {
+            for key in [
+                crate::onboard::worktree_path_key(&seat.id),
+                crate::onboard::worktree_repo_path_key(&seat.id, repo),
+            ] {
+                if tx
+                    .get_meta(&key)?
+                    .is_some_and(|recorded| !recorded.is_empty() && same(&recorded))
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    })
 }
 
 /// The repo's integration worktree, opened the way every merge opens it (seat
@@ -17363,6 +17396,53 @@ gate = "{project_gate}"
         assert!(
             !herdr.worktree_branches().contains(&"p/feature/f-1"),
             "the feature's merge worktree is removed: {:?}",
+            herdr.worktree_branches()
+        );
+    }
+
+    /// A lane's own worktree that has the feature's branch checked out (the
+    /// integration task works it there) is not the feature's merge worktree:
+    /// it stays when the feature lands (MissHerAI M2.1, 2026-11-18: the media
+    /// and room lanes lost their worktrees and workspaces).
+    #[test]
+    fn a_landed_feature_keeps_the_lanes_own_worktree() {
+        let pair = Pair::new("feature-keep-lane", false);
+        let feature_tip = feature_branch_on(&pair.work, "dev");
+        let lane_path = feature_worktree_on(&pair, "p/feature/f-1");
+        let mut store = feature_world(&pair.a, &pair.b, &feature_tip);
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &crate::onboard::worktree_path_key("p:heat"),
+                    &lane_path.to_string_lossy(),
+                )
+            })
+            .unwrap();
+        pass(&mut store, "T-3", &feature_tip, 1);
+        let cfg = test_cfg();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let integration = pair.merge_worktree();
+        herdr.add_worktree(
+            "p/merge/between-voyages",
+            &integration.path,
+            &integration.pane_id,
+        );
+        herdr.add_worktree(
+            "p/feature/f-1",
+            &lane_path.to_string_lossy(),
+            "wt-feature:p1",
+        );
+
+        quiet_ticks(&mut store, &mut herdr, &cfg, 4);
+
+        assert!(
+            pair.dev_log().contains("feature"),
+            "the feature landed on dev: {}",
+            pair.dev_log()
+        );
+        assert!(
+            herdr.worktree_branches().contains(&"p/feature/f-1"),
+            "the lane's own worktree is kept: {:?}",
             herdr.worktree_branches()
         );
     }
