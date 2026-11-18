@@ -54,6 +54,9 @@ pub struct Report {
     /// The captain's goal check of the voyage's done clauses (T-461), with
     /// the evidence or the reason each clause carries.
     pub goal_check: Vec<crate::goal::DoneCheck>,
+    /// The corrections of lanes and reviewers, each with what prevents it
+    /// now; one with nothing on its right-hand side is flagged.
+    pub corrections: Vec<DecisionLine>,
     /// How many decisions of each kind there are besides the ★ ones.
     pub kind_counts: Vec<(String, usize)>,
     /// Every decision of the voyage (only with `--all`).
@@ -253,9 +256,18 @@ pub fn report_with(
         .filter(|d| d.kind == "cut" || d.kind == "move")
         .cloned()
         .collect();
+    let corrections: Vec<DecisionLine> = decisions
+        .iter()
+        .filter(|d| d.kind == "correction")
+        .cloned()
+        .collect();
     let goal_check = crate::goal::goal_check(tx, project, milestone, voyage.done.as_deref())?;
     let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
-    for decision in decisions.iter().filter(|d| !d.star) {
+    // The corrections are listed in full in their own part, so not counted.
+    for decision in decisions
+        .iter()
+        .filter(|d| !d.star && d.kind != "correction")
+    {
         *kind_counts.entry(decision.kind.clone()).or_default() += 1;
     }
     // The friction reports with their outcomes; the open ones are marked.
@@ -301,6 +313,7 @@ pub fn report_with(
         confirmed,
         cuts,
         goal_check,
+        corrections,
         kind_counts: kind_counts.into_iter().collect(),
         all_decisions: if all { decisions } else { Vec::new() },
         frictions,
@@ -416,6 +429,39 @@ pub fn render(report: &Report) -> String {
             }
         };
         lines.push(format!("  ({}) {} · {state}", check.n, check.text));
+    }
+    lines.push(String::new());
+    // 3d. The corrections, each with what prevents it now; one whose
+    // right-hand side is empty is flagged.
+    let unanswered = report
+        .corrections
+        .iter()
+        .filter(|c| c.why.is_none())
+        .count();
+    lines.push(if unanswered == 0 {
+        format!("Corrections ({})", report.milestone)
+    } else {
+        format!(
+            "Corrections ({}) · {unanswered} without what prevents it",
+            report.milestone
+        )
+    });
+    if report.corrections.is_empty() {
+        lines.push("  no correction".to_string());
+    }
+    for correction in &report.corrections {
+        let at = if correction.at.is_empty() {
+            String::new()
+        } else {
+            format!("{} · ", correction.at)
+        };
+        match &correction.why {
+            Some(prevents) => lines.push(format!("  {at}{} -> {prevents}", correction.what)),
+            None => lines.push(format!(
+                "  ⚠ {at}{} -> (empty: name the check or change that prevents it, or judgment only: why)",
+                correction.what
+            )),
+        }
     }
     lines.push(String::new());
     // 4. Time and tokens: the wall clock (§5.4), the work and waiting time

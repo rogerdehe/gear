@@ -7972,6 +7972,28 @@ path="api"
                     line: None,
                     plan_version: None,
                 })?;
+                // Two corrections: one with what prevents it, one without.
+                for (key, line) in [
+                    ("k4", "2026-10-26 13:00 correction: heat skipped the build -> the charter runs the build"),
+                    ("k5", "2026-10-26 14:00 correction: the reviewer passed a red test ->"),
+                ] {
+                    let parsed = gear_app::decision::parse(line);
+                    tx.insert_decision_if_new(&gear_store::NewDecision {
+                        project: "p".into(),
+                        key: key.into(),
+                        voyage: "M2".into(),
+                        at: parsed.at,
+                        kind: parsed.kind,
+                        what: parsed.what,
+                        why: parsed.why,
+                        alt: None,
+                        changes: None,
+                        star: false,
+                        source: "plan".into(),
+                        line: None,
+                        plan_version: None,
+                    })?;
+                }
                 // A friction report, open.
                 tx.insert_friction(&gear_store::NewFriction {
                     project: "p".into(),
@@ -8012,6 +8034,19 @@ path="api"
         assert!(out.contains("★ scope · the board reads well"), "{out}");
         assert!(out.contains("why: the user asked"), "{out}");
         assert!(out.contains("others: estimate 2"), "{out}");
+        // The corrections, each with what prevents it; the empty one flagged.
+        assert!(
+            out.contains("Corrections (M2) · 1 without what prevents it"),
+            "{out}"
+        );
+        assert!(
+            out.contains("heat skipped the build -> the charter runs the build"),
+            "{out}"
+        );
+        assert!(
+            out.contains("⚠ 2026-10-26 14:00 · the reviewer passed a red test -> (empty"),
+            "{out}"
+        );
         // 5. The friction report, open.
         assert!(out.contains("the build took too long"), "{out}");
         assert!(out.contains("open"), "{out}");
