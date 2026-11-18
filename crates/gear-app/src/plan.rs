@@ -3811,10 +3811,17 @@ fn restart_seat(tx: &Tx<'_>, project: &str, name: &str, line: usize, now: Ts) ->
             if seat.state != SeatState::Active {
                 return Err(GearError::new(
                     ErrorCode::BadTransition,
-                    format!(
-                        "seat {seat_id} is {}: only an active lane is restarted",
-                        seat.state.as_str()
-                    ),
+                    match seat.state {
+                        // The way back for a lane the engine stopped or lost.
+                        SeatState::NeedsCheck | SeatState::Unknown => format!(
+                            "seat {seat_id} is {}: only an active lane is restarted; bring it back with `- retry {name}`",
+                            seat.state.as_str()
+                        ),
+                        _ => format!(
+                            "seat {seat_id} is {}: only an active lane is restarted",
+                            seat.state.as_str()
+                        ),
+                    },
                 ));
             }
         }
