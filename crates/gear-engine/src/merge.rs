@@ -6558,7 +6558,10 @@ fn sweep_in(
             let told = store
                 .read(|tx| tx.get_meta(&key))?
                 .and_then(|value| value.parse::<i64>().ok());
-            if told.is_some_and(|at| now - at < limit) {
+            // A done task's branch changes only by hand, so time brings
+            // nothing new: it is named once, never again (a retell only
+            // nags a captain that waits for the user).
+            if told.is_some() {
                 continue;
             }
             store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
@@ -12298,6 +12301,30 @@ gate = "{gate}"
             "{}",
             body[0]
         );
+
+        // A done task's branch does not change by itself: once named, it is
+        // not named again, however long the captain waits for the user
+        // (MissHerAI M2, 2026-11-17: every task was done and the landing
+        // waited for the user, and the same branches came back every two
+        // hours).
+        let later = now + 10 * 3600;
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        sweep_in(
+            &mut store,
+            "p",
+            &config,
+            &work,
+            remote,
+            found,
+            later,
+            "dev",
+            Some(dev.trim()),
+        )
+        .unwrap();
+        let items = store
+            .read(|tx| tx.messages_in_threads_starting("p", "branches:"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "named once: {items:?}");
     }
 
     /// A done task carried by another task that has not merged yet (Lawrence
