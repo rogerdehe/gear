@@ -1633,6 +1633,16 @@ pub fn rewrite_applied(
                 }
             }
         }
+        // `state: ready` moves a draft task to ready once: carried out, it is
+        // gone, or the next apply refuses it on a task that is no draft any
+        // more (MissHerAI T-64, 2026-11-18). `hold` and `cancelled` stay:
+        // they describe the state the task keeps.
+        if trimmed
+            .strip_prefix("state:")
+            .is_some_and(|value| value.trim() == "ready")
+        {
+            continue;
+        }
         // M7.3: a `deps:` line names its NEW blocks by label; the file keeps
         // the ids the apply gave them.
         if let Some(value) = trimmed.strip_prefix("deps:") {
@@ -1881,6 +1891,24 @@ mod tests {
         assert!(!rewritten.contains("remerge"), "{rewritten}");
         assert!(!rewritten.contains("hold heat"), "{rewritten}");
         // The file still parses as a draft.
+        parse(&rewritten).unwrap();
+    }
+
+    /// `state: ready` is carried out once; the rewritten file drops it and
+    /// keeps `hold` and `cancelled`, which the task goes on being.
+    #[test]
+    fn a_carried_out_state_ready_line_is_gone() {
+        let text = format!(
+            "{HEADER}# Queue\n## T-64 [must] lane=heat\ngoal: A\naccept: a\ndeps: -\nstate: ready\n\n## T-65 [must] lane=heat\ngoal: B\naccept: b\ndeps: -\nstate: hold\n\n## T-66 [must] lane=heat\ngoal: C\naccept: c\ndeps: -\nstate: cancelled\n"
+        );
+        let rewritten = rewrite_applied(&text, 2, &[], &[], &[], &[]);
+        assert!(!rewritten.contains("state: ready"), "{rewritten}");
+        assert!(rewritten.contains("state: hold"), "{rewritten}");
+        assert!(rewritten.contains("state: cancelled"), "{rewritten}");
+        assert!(
+            rewritten.contains("## T-64 [must] lane=heat"),
+            "{rewritten}"
+        );
         parse(&rewritten).unwrap();
     }
 

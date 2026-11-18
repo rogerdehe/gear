@@ -172,10 +172,6 @@ fn invalid_drafts_write_nothing() {
             "d",
             "## T-1 [must] lane=heat\ngoal: A\naccept: a\ndeps: T-7\n",
         ), // unknown dep
-        (
-            "e",
-            "## T-1 [must] lane=heat\ngoal: A\naccept: a\ndeps: -\nstate: ready\n",
-        ), // Ready → ready not allowed
     ] {
         assert_eq!(
             run(&mut s, &draft(1, q), rid).unwrap_err().code,

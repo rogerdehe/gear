@@ -5260,8 +5260,8 @@ fn tell_captain(
 
 /// The key that remembers that the captain was told that an attempt was handed
 /// in while the project has no reviewers to settle it (`[temps]` absent).
-fn verdict_wait_key(task: &str, attempt: i64) -> String {
-    format!("engine.verdict_wait.{task}.{attempt}")
+fn verdict_wait_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.verdict_wait.{project}.{task}.{attempt}")
 }
 
 /// A project without `[temps]` has no reviewer: a hand-in would wait in
@@ -5283,7 +5283,7 @@ fn tell_captain_of_hand_ins_without_reviewers(
         for task in &hand_ins {
             // One message per attempt: a tick does not bring the same news
             // back, and a resolved item stays resolved.
-            let key = verdict_wait_key(&task.task, task.attempt);
+            let key = verdict_wait_key(project, &task.task, task.attempt);
             if tx.get_meta(&key)?.is_some() {
                 continue;
             }
@@ -5320,14 +5320,14 @@ const REVIEW_STALL_S: i64 = 1200;
 
 /// The key that remembers that the captain was told that a hand-in waits
 /// without a reviewer's packet.
-fn review_stall_key(task: &str, attempt: i64) -> String {
-    format!("engine.review_stall.{task}.{attempt}")
+fn review_stall_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.review_stall.{project}.{task}.{attempt}")
 }
 
 /// The key that remembers the first tick a reviewer could take a hand-in
 /// (T-514): the stall counts from there, not from the hand-in.
-fn review_free_since_key(task: &str, attempt: i64) -> String {
-    format!("engine.review_free_since.{task}.{attempt}")
+fn review_free_since_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.review_free_since.{project}.{task}.{attempt}")
 }
 
 /// The value of that key while every reviewer held another task's review: a
@@ -5408,7 +5408,7 @@ fn tell_captain_of_a_review_stall(
         for task in &hand_ins {
             // One message per attempt: a tick does not bring the same news
             // back, and a resolved item stays resolved.
-            let key = review_stall_key(&task.task, task.attempt);
+            let key = review_stall_key(project, &task.task, task.attempt);
             if tx.get_meta(&key)?.is_some() {
                 continue;
             }
@@ -5433,7 +5433,10 @@ fn tell_captain_of_a_review_stall(
                             .is_ok_and(|seat| seat.is_some_and(|seat| seat.role == SeatRole::Temp))
                 });
             if reached {
-                tx.set_meta(&review_free_since_key(&task.task, task.attempt), "")?;
+                tx.set_meta(
+                    &review_free_since_key(project, &task.task, task.attempt),
+                    "",
+                )?;
                 continue;
             }
             // T-480: a rework's review waits for the seat that reviewed the
@@ -5460,7 +5463,7 @@ fn tell_captain_of_a_review_stall(
             // take this hand-in. While every seat is on another task's review
             // the hand-in is next in line, not stalled: nothing rings, and the
             // count starts again once a seat frees.
-            let free_key = review_free_since_key(&task.task, task.attempt);
+            let free_key = review_free_since_key(project, &task.task, task.attempt);
             let free_since = if reviewer_free {
                 match tx.get_meta(&free_key)?.as_deref() {
                     // The count is already running.
@@ -5948,7 +5951,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             "T-1 attempt 1 was handed in and this project has no reviewers ([temps]): settle it in # Verdicts (pass with evidence=, or fail with rework=)"
         );
         assert!(store
-            .read(|tx| tx.get_meta("engine.verdict_wait.T-1.1"))
+            .read(|tx| tx.get_meta("engine.verdict_wait.p.T-1.1"))
             .unwrap()
             .is_some());
 
@@ -6020,7 +6023,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             second[0].body
         );
         assert!(store
-            .read(|tx| tx.get_meta("engine.verdict_wait.T-1.2"))
+            .read(|tx| tx.get_meta("engine.verdict_wait.p.T-1.2"))
             .unwrap()
             .is_some());
     }
@@ -6045,7 +6048,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
         assert_eq!(thread(&mut store, "verdict:T-1:1").len(), 0);
         assert!(store
-            .read(|tx| tx.get_meta("engine.verdict_wait.T-1.1"))
+            .read(|tx| tx.get_meta("engine.verdict_wait.p.T-1.1"))
             .unwrap()
             .is_none());
     }
@@ -11069,12 +11072,12 @@ review = [
             "a hand-in queued behind busy reviewers is not a stall"
         );
         assert!(store
-            .read(|tx| tx.get_meta("engine.review_stall.T-1.1"))
+            .read(|tx| tx.get_meta("engine.review_stall.p.T-1.1"))
             .unwrap()
             .is_none());
         assert_eq!(
             store
-                .read(|tx| tx.get_meta("engine.review_free_since.T-1.1"))
+                .read(|tx| tx.get_meta("engine.review_free_since.p.T-1.1"))
                 .unwrap()
                 .as_deref(),
             Some(BUSY_SEEN),
@@ -11147,7 +11150,7 @@ review = [
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", freed).unwrap();
         assert_eq!(
             store
-                .read(|tx| tx.get_meta("engine.review_free_since.T-1.1"))
+                .read(|tx| tx.get_meta("engine.review_free_since.p.T-1.1"))
                 .unwrap()
                 .as_deref(),
             Some(freed.to_string().as_str()),
@@ -11229,6 +11232,13 @@ review = [
                     testing::seed_temp_seat(tx, "p", "review-2", "T-8", "wt8:p1", "codex", T0)?;
                 tx.set_seat_task(&warm.id, "")?;
                 tx.set_meta(&pending_review_key(&warm.id), "")?;
+                // Another project's attempt with the same task id and number
+                // started its count long ago, under the old key without a
+                // project and under its own (MissHerAI T-58 attempt 2,
+                // 2026-11-18, rang at 0 min on Lawrence's T-58 attempt 2 of
+                // two weeks before): neither is this project's count.
+                tx.set_meta("engine.review_free_since.T-1.1", "1")?;
+                tx.set_meta("engine.review_free_since.q.T-1.1", "1")?;
                 tx.set_seat_state(&warm.id, SeatState::Standby, None, T0)
                     .map(|_| ())
             })
@@ -11273,7 +11283,7 @@ review = [
             told[0].body
         );
         assert!(store
-            .read(|tx| tx.get_meta("engine.review_stall.T-1.1"))
+            .read(|tx| tx.get_meta("engine.review_stall.p.T-1.1"))
             .unwrap()
             .is_some());
         // It rings: the item is the captain's.
@@ -11344,7 +11354,7 @@ review = [
 
         assert!(thread(&mut store, "review-stall:T-1:1").is_empty());
         assert!(store
-            .read(|tx| tx.get_meta("engine.review_stall.T-1.1"))
+            .read(|tx| tx.get_meta("engine.review_stall.p.T-1.1"))
             .unwrap()
             .is_none());
     }
