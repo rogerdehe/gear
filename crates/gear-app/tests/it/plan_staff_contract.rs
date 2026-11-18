@@ -1107,4 +1107,11 @@ fn restart_records_a_lanes_request() {
             .unwrap(),
         None
     );
+    // A lane GEAR stopped is not restarted: the refusal names the line that
+    // brings it back.
+    s.write(|tx| tx.set_seat_state("p:wire", SeatState::NeedsCheck, Some("stopped"), T0))
+        .unwrap();
+    let error = run_at(&mut s, "- restart wire\n", "restart-needs-check").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition, "{error:?}");
+    assert!(error.detail.contains("`- retry wire`"), "{error:?}");
 }
