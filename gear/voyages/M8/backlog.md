@@ -3,6 +3,7 @@
 The next voyage's candidates. Its goal is agreed at its kickoff.
 
 ## Candidates
+- **A typed correction line the landing walk lists** (MissHerAI M2, 2026-11-18): the captain records each correction of a lane or reviewer as a note `correction <what> -> <the check or change that prevents it | judgment only: why>`, logged unstructured. A `correction` decision kind that `gear report voyage` lists at landing, flagging one with no right-hand side, would make the walk mechanical. Weigh it against the friction reports and lessons the landing already walks, so it adds a list and not a second record of the same thing.
 - **A done clause added after departure did not reach the stored done text** (M7.3, 2026-11-17): the apply with `--confirmed` and a `confirmed:` line recorded the confirmation, but the voyage's done text (doorbells, `gear report voyage`, the goal check) kept five clauses without the new (6). Find where a confirmed `done:` change of a departed milestone is written and why it was not.
 - **The gate is at 42 s of its 80 s limit** (M7.3 landing, 2026-11-17): the warm gate warned it is over half. Find the slowest test binaries before the next voyage adds to them.
 - **A task registered as already done hits `max_task_min`** (Prometheus M5, 2026-11-11): work done before the voyage was registered was refused for its real estimate (120 > 60); the captain raised the cap. Decide at kickoff whether the cap applies to a captain-alone project at all, since it sizes packets for lanes.
