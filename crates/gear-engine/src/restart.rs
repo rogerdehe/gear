@@ -1032,7 +1032,7 @@ fn start(
     } else {
         pane_of(store, seat)?
     };
-    let Some(pane) = pane else {
+    let Some(mut pane) = pane else {
         return fail_start(
             store,
             herdr,
@@ -1042,6 +1042,30 @@ fn start(
             now,
         );
     };
+    // The lane's pane may be gone with its workspace (MissHerAI media,
+    // 2026-11-18: the workspace was closed, and the environment line was typed
+    // into a pane that no longer existed until the restart gave up). Before
+    // the generation is reserved, the lane's own worktree is opened again and
+    // its root pane takes the restart.
+    if !split && plan.generation == 0 && seat.role == SeatRole::Lane {
+        if let Ok(panes) = herdr.panes() {
+            if !panes.iter().any(|known| known == &pane) {
+                match reopen_lane_pane(store, herdr, seat)? {
+                    Ok(reopened) => pane = reopened,
+                    Err(reason) => {
+                        return fail_start(
+                            store,
+                            herdr,
+                            seat,
+                            plan,
+                            &format!("the lane's pane {pane} is gone and its worktree could not be opened again: {reason}"),
+                            now,
+                        );
+                    }
+                }
+            }
+        }
+    }
     let selected = plan
         .profile_name
         .as_deref()
@@ -1888,6 +1912,32 @@ fn env_ready(
         // The pane refused the line: the next tick tries again.
         Ok(false)
     }
+}
+
+/// Open a lane's recorded worktree again in Herdr and return its root pane.
+fn reopen_lane_pane(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+) -> GearResult<Result<String, String>> {
+    let Some(path) = worktree_path(store, seat)?.filter(|path| !path.is_empty()) else {
+        return Ok(Err("no worktree is recorded for the lane".to_string()));
+    };
+    let repo = store.read(|tx| {
+        Ok(tx
+            .get_project(&seat.project)?
+            .and_then(|row| gear_app::config::parse_row(&row).ok())
+            .map(|config| config.repo_of_lane(&seat.name).path))
+    })?;
+    let Some(repo) = repo else {
+        return Ok(Err("the project's config cannot be read".to_string()));
+    };
+    let label = format!("{}-{}", seat.project, seat.name);
+    Ok(match herdr.worktree_open_path(&repo, &path, &label) {
+        Outcome::Ok(worktree) => Ok(worktree.pane_id),
+        Outcome::Refused { code, message } => Err(format!("{code}: {message}")),
+        other => Err(format!("{other:?}")),
+    })
 }
 
 /// One step that waits: the plan is kept and the next tick continues it.
@@ -2804,6 +2854,51 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             )),
             "{export}"
         );
+    }
+
+    /// A lane whose pane is gone with its workspace (MissHerAI media,
+    /// 2026-11-18) is restarted in its own worktree opened again, not left
+    /// typing the environment line into a pane that no longer exists.
+    #[test]
+    fn a_restart_reopens_a_lanes_worktree_whose_pane_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        change_to(&mut store, "pi", "new-model", "[\"--effort\", \"high\"]");
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        // The workspace was closed: the agent and its pane are gone.
+        herdr.exit_agent(PANE);
+        let _ = herdr.pane_close(PANE);
+        let path = "/fake-worktrees/p-heat";
+        herdr.add_worktree("p/heat", path, "gone:p1");
+        store
+            .write(|tx| tx.set_meta(&crate::onboard::worktree_path_key("p:heat"), path))
+            .unwrap();
+        advance_pending(&mut store, &mut herdr, &cfg, T + 2);
+
+        assert!(
+            herdr.calls.iter().any(|call| matches!(
+                call,
+                Call::WorktreeOpenPath { path: opened, .. } if opened == path
+            )),
+            "the lane's worktree is opened again: {:?}",
+            herdr.calls
+        );
+        let started = herdr
+            .calls
+            .iter()
+            .find_map(|call| match call {
+                Call::AgentStart { pane, .. } => Some(pane.clone()),
+                _ => None,
+            })
+            .expect("the agent is started");
+        assert_ne!(started, PANE, "not in the pane that is gone");
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let binding = store
+            .read(|tx| tx.get_binding("p:heat", seat.generation))
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.pane_id, started, "the new binding is the new pane");
     }
 
     #[test]
