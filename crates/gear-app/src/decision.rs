@@ -20,7 +20,7 @@
 //! skipped and an edited line is a new decision.
 
 /// The kinds a decision may have (§7.2).
-pub const KINDS: [&str; 17] = [
+pub const KINDS: [&str; 18] = [
     "scope",
     "cut",
     "split",
@@ -38,6 +38,7 @@ pub const KINDS: [&str; 17] = [
     "user",
     "confirmed",
     "correction",
+    "standalone",
 ];
 
 /// One decision of the log, as the captain wrote it.

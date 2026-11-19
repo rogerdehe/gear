@@ -80,6 +80,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             feature_branch: "{project}/feature/{feature}".into(),
             feature_check: None,
             feature_max_tasks: 10,
+            standalone_max_tasks: 8,
             push_interval_min: 20,
             push_reply_min: 10,
             // T-255: `gate` has no default; the fixture names one.
