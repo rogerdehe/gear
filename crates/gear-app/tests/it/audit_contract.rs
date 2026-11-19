@@ -416,4 +416,23 @@ fn a_review_verdict_on_an_audit_waits_for_the_captain() {
     );
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!(attempt.state, AttemptState::Submitted);
+
+    // alfred M1: the next ticks settle the same verdict again; the captain
+    // is told once.
+    for at in [NOW + 11, NOW + 16, NOW + 21] {
+        s.write(|tx| gear_app::tasks::settle_review(tx, "p", "T-1", 1, at))
+            .unwrap();
+    }
+    for thread in ["T-1:cap", "T-1:review"] {
+        let told = s
+            .read(|tx| tx.thread_messages("p", thread))
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.body.starts_with("T-1: audit review is in"))
+            .count();
+        assert!(
+            told <= 1,
+            "{thread}: the captain is told once per attempt, not {told} times"
+        );
+    }
 }
