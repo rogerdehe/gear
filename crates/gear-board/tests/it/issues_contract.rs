@@ -158,8 +158,8 @@ fn board(store: &mut Store) -> Board {
     gear_board::build(store, &options, NOW).unwrap()
 }
 
-fn now_view(board: &Board) -> String {
-    frame::frame(board, &crate::screen(Tab::Now, 0, (160, 60)), None)
+fn tasks_view(board: &Board) -> String {
+    frame::frame(board, &crate::screen(Tab::Tasks, 0, (160, 60)), None)
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn the_voyage_view_lists_every_state_with_its_issues() {
     issue(&mut store, 8, 0);
 
     let board = board(&mut store);
-    let text = now_view(&board);
+    let text = tasks_view(&board);
     assert!(text.contains("Issues (p/M2)"), "{text}");
     for line in [
         "pending #3",
@@ -210,6 +210,6 @@ fn a_voyage_without_labeled_issues_shows_no_block() {
     task(&mut store, "T-1", 1, TaskState::Done, 1);
     attempt(&mut store, "T-1", true);
     let board = board(&mut store);
-    let text = now_view(&board);
+    let text = tasks_view(&board);
     assert!(!text.contains("Issues"), "{text}");
 }

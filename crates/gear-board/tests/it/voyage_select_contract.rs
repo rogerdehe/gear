@@ -324,7 +324,7 @@ fn the_head_lists_every_voyage_and_lights_the_shown_one() {
     )
     .unwrap();
     let size = (160, 40);
-    let screen = crate::screen(Tab::Now, 0, size);
+    let screen = crate::screen(Tab::Tasks, 0, size);
     let canvas = frame::canvas(&board, &screen, None);
     let text = canvas.text();
     let head = frame::layout(&board, &screen);

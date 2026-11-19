@@ -181,39 +181,27 @@ fn column(line: &str, needle: &str) -> usize {
     line[..at].chars().count()
 }
 
+/// A lane past its estimate is red in the Cost view: `rewrite` ran 60 of its
+/// 30 minutes, so its ratio is 2.0x, in Bad. The lane's name is bold in its
+/// lane colour, and the mark before it stays accent-coloured, even on a space.
 #[test]
-fn a_task_over_its_estimate_is_red() {
+fn a_lane_over_its_estimate_is_red_in_the_cost_view() {
     let board = board();
-    let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
+    let screen = canvas(&board, &crate::screen(Tab::Cost, 0, (160, 40)), None);
     let text = screen.text();
-    // T-2 has run 60 of its 30 minutes: its TIME is full red and carries the
-    // warning mark (T-359).
-    let (row, x) = find(&text, "60/30m ⚠");
+    let (row, x) = find(&text, "2.0x");
     assert_eq!(screen.style_at(x, row).fg, Some(Color::Bad), "{text}");
-    let ansi = screen.ansi(true);
-    let end = ansi
-        .find("60/30m ⚠\u{1b}[0m")
-        .expect("the time ends its red run");
-    assert!(
-        ansi[..end].rfind("\u{1b}[") == ansi[..end].rfind("\u{1b}[31m"),
-        "{ansi:?}"
-    );
-    // The block's heading is yellow and bold, and the over-estimate item is
-    // yellow with the warning mark (T-360).
-    let (row, x) = find(&text, "TO HANDLE (");
+    // A lane a little past its estimate is yellow, not red: `hull` ran 44 of
+    // its 40 minutes. It is the first row, so the second is selected to keep
+    // it unlit.
+    let second = canvas(&board, &crate::screen(Tab::Cost, 1, (160, 40)), None);
+    let (row_hull, x_hull) = find(&second.text(), "1.1x");
     assert_eq!(
-        screen.style_at(x, row),
-        Style::fg(Color::Warn).and_bold(),
+        second.style_at(x_hull, row_hull).fg,
+        Some(Color::Warn),
         "{text}"
     );
-    assert_eq!(
-        screen.style_at(3, row + 1),
-        Style::fg(Color::Warn),
-        "{text}"
-    );
-    // An unselected lane's name is bold, in its lane colour (the second lane
-    // is magenta); the mark before it stays accent-coloured, even on a space.
-    let (row, _) = find(&text, "T-2 Give internal");
+    // The second lane, unselected, is magenta and bold; its mark is accent.
     assert_eq!(screen.style_at(1, row), Style::fg(Color::Acc));
     assert_eq!(screen.style_at(3, row), Style::fg(Color::Mag).and_bold());
 }
@@ -222,11 +210,11 @@ fn a_task_over_its_estimate_is_red() {
 fn the_selected_row_is_lit_across_the_width_in_one_colour() {
     let board = board();
     let size = (160, 40);
-    // The second lane of the fixture, `rewrite`, is the selected row.
-    let screen_of = crate::screen(Tab::Now, 1, size);
+    // The second task row of the graph, T-2, is the selected row.
+    let screen_of = crate::screen(Tab::Tasks, 1, size);
     let screen = canvas(&board, &screen_of, None);
     let text = screen.text();
-    let (row, _) = find(&text, "T-2 Give internal");
+    let (row, _) = find(&text, "Give internal");
     let lit = Style {
         fg: None,
         bold: false,
@@ -358,7 +346,7 @@ fn no_color_draws_no_colour_code() {
         );
     }
     // The plain frame carries no code at all, and neither does the JSON.
-    assert!(!frame(&board, &crate::screen(Tab::Now, 0, (160, 40)), None).contains('\u{1b}'));
+    assert!(!frame(&board, &crate::screen(Tab::Tasks, 0, (160, 40)), None).contains('\u{1b}'));
     assert!(!to_json(&board).unwrap().contains('\u{1b}'));
 }
 
@@ -418,20 +406,6 @@ fn a_long_lane_name_never_moves_the_text_columns() {
     let head = line_with(&graph, "dev");
     assert!(head.contains("rewrit") && head.contains("hull"), "{head:?}");
 
-    // Now: the table's NOW DOING column starts at column 9 for every lane,
-    // whatever the name: a name longer than five cells runs into it and is cut
-    // by the task there, as the prototype paints it (T-359).
-    let now = frame(&board, &crate::screen(Tab::Now, 0, size), None);
-    assert!(now.contains("rewritT-2 Give internal"), "{now}");
-    let long = line_with(&now, "T-2 Give internal");
-    let short = line_with(&now, "nothing left planned for this lane");
-    assert_eq!(column(long, "T-2 Give internal"), 9, "{now}");
-    assert_eq!(
-        column(short, "nothing left planned for this lane"),
-        9,
-        "{now}"
-    );
-
     // Decisions: the friction's status follows the lane after a space.
     let decisions = frame(&board, &crate::screen(Tab::Log, 0, size), None);
     let long = line_with(&decisions, "friction of rewrite");
@@ -452,27 +426,4 @@ fn a_long_lane_name_never_moves_the_text_columns() {
     assert_eq!(column(long, "30m"), column(short, "40m"), "{cost}");
     let heading = line_with(&cost, "lane / task");
     assert_eq!(column(heading, "est"), column(long, "30m"), "{cost}");
-}
-
-/// A cancelled task is not the lane's next task (Lawrence M2, 2026-11-06: the
-/// web lane read "next T-69 is ready but not delivered" for a cancelled T-69,
-/// while the engine, rightly, never dispatched it).
-#[test]
-fn a_cancelled_task_is_not_the_lanes_next_task() {
-    let mut store = world();
-    store
-        .write(|tx| tx.insert_task(&task("T-3", "hull", TaskState::Cancelled, 20)))
-        .unwrap();
-    let board = gear_board::build(
-        &mut store,
-        &Options {
-            project: Some("p".into()),
-            ..Default::default()
-        },
-        now_seconds(),
-    )
-    .unwrap();
-    let now = frame(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
-    assert!(!now.contains("next T-3"), "{now}");
-    assert!(now.contains("nothing left planned for this lane"), "{now}");
 }

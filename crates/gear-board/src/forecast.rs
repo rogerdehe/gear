@@ -1,5 +1,5 @@
-//! Each lane's queue, played forward (T-349, M5 S4; the board's ENDS and
-//! TO HANDLE columns).
+//! Each lane's queue, played forward (T-349, M5 S4; the header's expected
+//! finish).
 //!
 //! A lane is free again when it hands a task in; its next task starts when the
 //! lane is free *and* every task it depends on has merged (hand-in plus review

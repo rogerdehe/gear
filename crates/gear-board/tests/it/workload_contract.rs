@@ -1,6 +1,5 @@
 //! T-158: the projection per lane (design §10.7 row B4).
 
-use gear_board::frame::lane_panel;
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, Store, TaskRow};
 
@@ -138,38 +137,6 @@ fn attempt(
     tx.set_attempt_time("p", task, 1, gear_store::AttemptStep::Started, started)?;
     tx.set_attempt_time("p", task, 1, gear_store::AttemptStep::HandedIn, handed_in)?;
     tx.set_attempt_time("p", task, 1, gear_store::AttemptStep::Merged, merged)?;
-    Ok(())
-}
-
-/// An open attempt of the fixture, on the step it is: the state the stage
-/// rules read (T-346).
-fn open_attempt(
-    tx: &gear_store::Tx<'_>,
-    task: &str,
-    state: AttemptState,
-    started: i64,
-) -> gear_model::GearResult<()> {
-    tx.insert_attempt(&AttemptRow {
-        project: "p".into(),
-        task: task.into(),
-        n: 1,
-        seat: "p:deck".into(),
-        generation: 1,
-        contract_version: 1,
-        adopted_version: 1,
-        pending_update: None,
-        state,
-        candidate: None,
-        report: None,
-        safe_point: None,
-        started,
-        updated: started,
-        session_ref: None,
-        session_cli: None,
-        session_action: None,
-        sent_at: None,
-    })?;
-    tx.set_attempt_time("p", task, 1, gear_store::AttemptStep::Started, started)?;
     Ok(())
 }
 
@@ -353,33 +320,6 @@ fn the_burn_up_keeps_the_hours_without_progress() {
     );
 }
 
-#[test]
-fn the_lane_panel_shows_what_it_did_and_what_is_left() {
-    let mut store = world();
-    let board = gear_board::build(
-        &mut store,
-        &gear_board::Options {
-            project: Some("p".into()),
-            ..Default::default()
-        },
-        now_seconds(),
-    )
-    .unwrap();
-    let lane = board.projects[0]
-        .lanes
-        .iter()
-        .find(|lane| lane.lane == "deck")
-        .unwrap();
-    let panel = lane_panel(lane, &board.projects[0].graph);
-    let text = panel.join("\n");
-    assert!(text.contains("lane deck"), "{text}");
-    assert!(text.contains("DONE"), "{text}");
-    assert!(text.contains("T-3"), "{text}");
-    assert!(text.contains("LEFT, in order"), "{text}");
-    assert!(text.contains("T-4"), "{text}");
-    assert!(text.contains("left: 1 tasks, 60m of estimates"), "{text}");
-}
-
 /// A lane with open work and no measured history: its pace is unknown, so the
 /// finish of the voyage is unknown too (F2).
 #[test]
@@ -445,43 +385,4 @@ fn an_open_task_without_an_estimate_leaves_the_finish_unknown() {
     );
     assert_eq!(voyage.slowest_lane, None);
     assert_eq!(voyage.projected_min, None);
-}
-
-/// The lane panel: the running and the reviewing task are in NOW, the queued
-/// ones in LEFT — each task once (F4).
-#[test]
-fn the_lane_panel_shows_the_running_and_the_queued_work_once() {
-    let mut store = world();
-    store
-        .write(|tx| {
-            let mut running = tx.get_task("p", "T-4")?.unwrap();
-            running.state = TaskState::Running;
-            tx.update_task(&running)?;
-            open_attempt(tx, "T-4", AttemptState::Started, now_seconds())?;
-            task(tx, "T-5", "deck", 5, TaskState::Verifying, Some(20))?;
-            open_attempt(tx, "T-5", AttemptState::Submitted, now_seconds())?;
-            task(tx, "T-6", "deck", 6, TaskState::Ready, Some(15))
-        })
-        .unwrap();
-    let board = gear_board::build(
-        &mut store,
-        &gear_board::Options {
-            project: Some("p".into()),
-            ..Default::default()
-        },
-        now_seconds(),
-    )
-    .unwrap();
-    let lane = board.projects[0]
-        .lanes
-        .iter()
-        .find(|lane| lane.lane == "deck")
-        .unwrap();
-    let text = lane_panel(lane, &board.projects[0].graph).join("\n");
-    // The running and the reviewing task are in NOW, once each.
-    assert_eq!(text.matches("T-4").count(), 1, "{text}");
-    assert_eq!(text.matches("T-5").count(), 1, "{text}");
-    // LEFT holds the queued task only.
-    assert!(text.contains("○ T-6"), "{text}");
-    assert!(text.contains("left: 1 tasks, 15m of estimates"), "{text}");
 }

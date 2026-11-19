@@ -146,7 +146,7 @@ impl Keys for Presses {
 }
 
 #[test]
-fn the_right_arrow_moves_to_the_next_view() {
+fn the_board_opens_on_the_graph_and_2_moves_to_the_next_view() {
     let mut store = world();
     let opts = Options {
         project: Some("p".into()),
@@ -159,9 +159,11 @@ fn the_right_arrow_moves_to_the_next_view() {
     run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
 
     let text = String::from_utf8(out).unwrap();
-    // The second view is the graph of the work (T-157).
-    assert!(text.contains("dev"), "{text}");
-    assert!(text.contains("rev"), "{text}");
+    // The first view is the graph of the work (T-157), the second the Cost
+    // view.
+    let graph = text.find("merged into dev").expect("the graph is drawn");
+    let cost = text.find("lane / task").expect("the Cost view is drawn");
+    assert!(graph < cost, "the graph comes first: {text}");
 }
 
 #[test]

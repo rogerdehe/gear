@@ -273,10 +273,16 @@ fn a_key_press_redraws_without_building_the_board() {
     let mut store = Store::open_in_memory().unwrap();
     seed(&mut store);
 
-    // The graph, then one row down, then quit: the tab and the selection are
-    // redrawn from the kept board. The second `Down` has nowhere to go on two
-    // tasks and writes no frame at all (T-403).
-    let events = vec![Event::Key('2'), Event::Down, Event::Down, Event::Key('q')];
+    // The Cost view, back to the graph, then one row down, then quit: the
+    // tabs and the selection are redrawn from the kept board. The second
+    // `Down` has nowhere to go on two tasks and writes no frame at all (T-403).
+    let events = vec![
+        Event::Key('2'),
+        Event::Key('1'),
+        Event::Down,
+        Event::Down,
+        Event::Key('q'),
+    ];
     let mut out: Vec<u8> = Vec::new();
     run_with(
         &mut store,
@@ -296,17 +302,17 @@ fn a_key_press_redraws_without_building_the_board() {
     // to go, so its frame is reused and not rendered again.
     assert_eq!(
         hook::renders(),
-        3,
-        "the first frame, the tab and the one move that changed the selection"
+        4,
+        "the first frame, the two tabs and the one move that changed the selection"
     );
     let drawn = frames(&out);
     assert_eq!(
         drawn.len(),
-        3,
+        4,
         "the first frame and one redraw per change: {drawn:?}"
     );
     assert_ne!(
-        drawn[0], drawn[2],
+        drawn[0], drawn[3],
         "the last frame shows the moved selection"
     );
 }
