@@ -495,6 +495,12 @@ pub const FEATURE_BRANCH: &str = "{project}/feature/{feature}";
 /// many tasks, so a set of work bigger than this is a voyage of its own.
 pub const FEATURE_MAX_TASKS: u32 = 10;
 
+/// The default cap on a voyage's tasks outside any feature: each one is
+/// reviewed and gated on its own, so a voyage cut into many small loose tasks
+/// queues a review and a gate for every one of them. More than this at
+/// departure is refused unless the captain writes why (`standalone:`).
+pub const STANDALONE_MAX_TASKS: u32 = 8;
+
 /// The default age, in minutes, past which a task's branch on the remote is
 /// named to the captain: a branch of a voyage is meant to be merged (or its
 /// task cancelled) within this time; one that lives longer means its work is
@@ -556,6 +562,10 @@ pub struct Conventions {
     /// How many tasks one feature may hold (M6.2): more than this is a voyage
     /// of its own. Default 10.
     pub feature_max_tasks: u32,
+    /// How many tasks of one voyage may stand outside any feature before a
+    /// departure, or an apply that adds more of them, needs a `standalone:`
+    /// decision saying why. Default 8; 0 = no check.
+    pub standalone_max_tasks: u32,
     /// A lane working this many minutes without a push is asked to tell the
     /// captain why. Default 20.
     pub push_interval_min: u32,
@@ -633,6 +643,7 @@ impl Default for Conventions {
             feature_branch: FEATURE_BRANCH.to_string(),
             feature_check: None,
             feature_max_tasks: FEATURE_MAX_TASKS,
+            standalone_max_tasks: STANDALONE_MAX_TASKS,
             push_interval_min: PUSH_INTERVAL_MIN,
             push_reply_min: PUSH_REPLY_MIN,
             gate: String::new(),

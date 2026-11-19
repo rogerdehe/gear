@@ -234,6 +234,9 @@ pub fn apply(
             // T-461: after every validation of the file has spoken, a new
             // milestone's departure and a move between milestones need the
             // user's word: --confirmed and its `confirmed:` line.
+            // A voyage cut into many loose tasks queues a review and a gate
+            // for every one: the departure says so before it happens.
+            standalone_guard(tx, &ctx.project, draft, &guard.0)?;
             require_confirmed_changes(draft, &guard.0, &guard.1)?;
             // An apply that leaves no lane any work while the departed voyage
             // still has work held back is a stop of the voyage: the user's,
@@ -4827,6 +4830,50 @@ gate = "true"
         );
     }
 
+    /// alfred M1, 2026-11-19: a voyage that departs with more loose tasks
+    /// than `standalone_max_tasks` is refused and names the way out; the
+    /// same tasks cut into features depart, and so do loose tasks the
+    /// captain says are unrelated in a `standalone:` line.
+    #[test]
+    fn a_voyage_of_loose_tasks_departs_only_with_features_or_a_reason() {
+        let block = |n: usize, feature: Option<&str>| {
+            let feature = feature
+                .map(|f| format!("feature: {f}\n"))
+                .unwrap_or_default();
+            format!("## NEW [must] lane=heat milestone=M1\ngoal: G{n}\naccept: a\nestimate: 20\ndeps: -\n{feature}")
+        };
+        let head = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: the voyage\ndone: it ships\nbar: stable\neta: 8h\ndepart: now\n\n";
+        let loose: String = (1..=9).map(|n| block(n, None)).collect();
+
+        let mut s = speed_world(5);
+        let text = format!("{head}# Queue\n{loose}");
+        let refused = run_confirmed(&mut s, &text, "r1").unwrap_err();
+        assert!(
+            refused
+                .detail
+                .contains("voyage M1 holds 9 tasks outside any feature")
+                && refused.detail.contains("standalone:"),
+            "{}",
+            refused.detail
+        );
+        assert!(
+            s.read(|tx| tx.get_task("p", "T-1")).unwrap().is_none(),
+            "nothing written"
+        );
+
+        let text = format!(
+            "{head}# Decisions\n- 2026-11-19 10:00 standalone: M1 keeps 9 loose tasks | why: nine unrelated fixes\n\n# Queue\n{loose}"
+        );
+        run_confirmed(&mut s, &text, "r2").unwrap();
+
+        let mut s = speed_world(5);
+        let grouped: String = (1..=9)
+            .map(|n| block(n, Some(if n <= 5 { "F-1" } else { "F-2" })))
+            .collect();
+        let text = format!("{head}# Queue\n{grouped}");
+        run_confirmed(&mut s, &text, "r3").unwrap();
+    }
+
     /// T-563: a task on a lane nobody works is named after the apply, one line
     /// per task, and the apply still stands (prometheus, 2026-11-04: four
     /// `now` tasks went to retired lanes and sat ready).
@@ -6066,6 +6113,99 @@ fn fleet_withheld(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Stri
         "{voyage} holds {} tasks back ({held} on hold, {ready_for_down} ready for held or parked lanes)",
         held + ready_for_down
     )))
+}
+
+/// The tasks of `milestone` that stand outside any feature: not cancelled,
+/// no `feature:`, not a feature's integration task, not an audit and not
+/// mechanical. Each is reviewed and gated on its own.
+fn standalone_tasks(tx: &Tx<'_>, project: &str, milestone: &str) -> GearResult<Vec<String>> {
+    let tasks: Vec<TaskRow> = tx
+        .tasks_of_project(project)?
+        .into_iter()
+        .filter(|task| task.milestone.as_deref() == Some(milestone))
+        .filter(|task| task.state != TaskState::Cancelled)
+        .collect();
+    let mut carriers: BTreeSet<String> = BTreeSet::new();
+    let mut marked: BTreeSet<String> = BTreeSet::new();
+    for task in &tasks {
+        if let Some(feature) = tx.task_feature(project, &task.id)? {
+            if !feature.is_empty() {
+                marked.insert(task.id.clone());
+                if let Some(carrier) = tx.feature_carrier(project, &feature)? {
+                    carriers.insert(carrier);
+                }
+            }
+        }
+    }
+    let mut loose = Vec::new();
+    for task in &tasks {
+        if marked.contains(&task.id)
+            || carriers.contains(&task.id)
+            || tx
+                .get_contract(project, &task.id, task.contract_version)?
+                .is_some_and(|contract| contract.mechanical.is_some())
+            || tx.task_audit(project, &task.id)? == Some(true)
+        {
+            continue;
+        }
+        loose.push(task.id.clone());
+    }
+    Ok(loose)
+}
+
+/// alfred M1, 2026-11-19: a voyage departed with every task loose, and each
+/// of its small tasks queued its own full review and gate; two reviewers
+/// behind five lanes made every hand-in wait 40 to 50 minutes. Decompose
+/// rule 8 asked for features, and nothing checked it. A departing voyage, or
+/// an apply that adds loose `NEW` tasks to a voyage, whose loose tasks exceed
+/// `[conventions] standalone_max_tasks` is refused unless `# Decisions`
+/// carries a `standalone:` line saying why they are unrelated.
+fn standalone_guard(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &Draft,
+    departing: &BTreeSet<String>,
+) -> GearResult<()> {
+    let Some(config) = project_config(tx, project)? else {
+        return Ok(());
+    };
+    let cap = config.conventions.standalone_max_tasks;
+    if cap == 0 || config.captain_alone() {
+        return Ok(());
+    }
+    let stated = draft.decisions.iter().any(|line| {
+        let decision = crate::decision::parse(line);
+        decision.kind == "standalone" && !decision.note
+    });
+    if stated {
+        return Ok(());
+    }
+    let mut milestones: BTreeSet<String> = departing.clone();
+    for item in &draft.queue {
+        let loose_new = item.id.is_none()
+            && item.feature.as_deref().is_none_or(str::is_empty)
+            && item.audit != Some(true)
+            && item.mechanical.is_none();
+        if loose_new {
+            if let Some(milestone) = &item.milestone {
+                milestones.insert(milestone.clone());
+            }
+        }
+    }
+    for milestone in &milestones {
+        let loose = standalone_tasks(tx, project, milestone)?;
+        if loose.len() as u32 > cap {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "voyage {milestone} holds {} tasks outside any feature, over the project's cap of {cap} ([conventions] standalone_max_tasks): each is reviewed and gated on its own, so the reviewers queue behind the lanes. Cut the tasks of one capability as `feature: F-<n>` (`gear --skill decompose` rule 8): members get a light check and the feature one full review and one gate. If these tasks are truly unrelated, say so in # Decisions: `- <YYYY-MM-DD HH:MM> standalone: {milestone} keeps {} loose tasks | why: <why they share no capability>`",
+                    loose.len(),
+                    loose.len()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// T-461: a new milestone's departure and a move between milestones are

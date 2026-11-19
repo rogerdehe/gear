@@ -7533,8 +7533,10 @@ fn tell_captain_lost(
 ) -> GearResult<()> {
     // One scan of the ops and one of the tasks per tick, like the merge keys of
     // the queue step: a project with no lost task pays two reads.
-    let (lost, carried_active, landed_carried) = store.read(|tx| {
+    let (lost, carried_active, carrier_failed, landed_carried) = store.read(|tx| {
         let mut carried_active: Vec<(String, String)> = Vec::new();
+        // Carried tasks whose carrier's merge failed with its item open.
+        let mut carrier_failed: Vec<(String, String)> = Vec::new();
         // T-615: carried tasks whose candidate is inside the carrier's merged
         // candidate: their work landed with that merge.
         let mut landed_carried: Vec<(String, i64, Ts)> = Vec::new();
@@ -7612,6 +7614,19 @@ fn tell_captain_lost(
                     && now - accepted_at < LAND_WITHIN_S
                 {
                     carried_active.push((task.id.clone(), by.clone()));
+                    continue;
+                }
+                // alfred M1, 2026-11-19: the carrier's own merge failed and its
+                // merge-failed item is open. That item already says the merge
+                // failed and how to retry it, and this work lands with it: a
+                // second item about the carried task rings for the same fact.
+                if carrier_merged_at.is_none()
+                    && tx
+                        .thread_messages(carrier_project, &failed_thread(carrier))?
+                        .iter()
+                        .any(|item| matches!(item.state, MsgState::Open | MsgState::Waiting))
+                {
+                    carrier_failed.push((task.id.clone(), by.clone()));
                     continue;
                 }
                 // T-615: the carrier has merged. Its merged candidate is the
@@ -7695,7 +7710,7 @@ fn tell_captain_lost(
                 carried,
             });
         }
-        Ok((lost, carried_active, landed_carried))
+        Ok((lost, carried_active, carrier_failed, landed_carried))
     })?;
     // A lost item about a task whose carrier is active again is answered.
     for (task, by) in carried_active {
@@ -7711,6 +7726,25 @@ fn tell_captain_lost(
                 project,
                 &task,
                 &format!("carried by {by}, which is being worked on"),
+                now,
+            )?;
+        }
+    }
+    // A lost item about a task whose carrier's merge failed is answered: the
+    // carrier's open merge-failed item speaks for both.
+    for (task, by) in carrier_failed {
+        let open = store.read(|tx| {
+            Ok(tx
+                .thread_messages(project, &lost_thread(&task))?
+                .into_iter()
+                .any(|message| message.state == MsgState::Open))
+        })?;
+        if open {
+            resolve_lost_with(
+                store,
+                project,
+                &task,
+                &format!("carried by {by}, whose merge-failed item is open"),
                 now,
             )?;
         }
@@ -9451,6 +9485,79 @@ mod tests {
             .read(|tx| tx.ops_of_kind_in_states("p", OpKind::Merge, &[]))
             .unwrap();
         assert_eq!(merges.len(), 1, "{merges:?}");
+    }
+
+    /// alfred M1, 2026-11-19: T-26 and T-27 rode on T-39, whose merge failed
+    /// on a conflict with its merge-failed item open; each was then named
+    /// "nothing will merge it". The carrier's open item speaks for them: no
+    /// item of their own while it is open, and they speak again once it is
+    /// settled with the carrier still unmerged.
+    #[test]
+    fn a_carried_task_is_not_named_lost_while_its_carriers_failed_item_is_open() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, "abc1234", "report", 0)?;
+                let mut attempt = tx.get_attempt("p", "T-5", 1)?.unwrap();
+                attempt.state = gear_model::AttemptState::Accepted;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                tx.set_task_carried_by("p", "T-5", "T-9")?;
+                tx.insert_message(&NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: failed_thread("T-9"),
+                    task: Some("T-9".into()),
+                    attempt: Some(1),
+                    sender: "p:captain".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Question,
+                    urgent: false,
+                    body: "merge of T-9 failed: conflict".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: 5,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20 + LOST_SCAN_EVERY_S).unwrap();
+        let lost = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(
+            lost.is_empty(),
+            "named lost beside the carrier's item: {lost:?}"
+        );
+
+        // The captain settles the carrier's item and the carrier stays
+        // unmerged: the carried work is named again.
+        store
+            .write(|tx| {
+                let item = tx.thread_messages("p", &failed_thread("T-9"))?.remove(0);
+                tx.update_message_state("p", &item.id, MsgState::Resolved, None, None, None, 30)
+            })
+            .unwrap();
+        merge_passed(
+            &mut store,
+            &mut herdr,
+            &cfg,
+            "p",
+            40 + 2 * LOST_SCAN_EVERY_S,
+        )
+        .unwrap();
+        let lost = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(lost.len(), 1, "{lost:?}");
     }
 
     /// A done task `task` whose attempt was accepted with `candidate` and

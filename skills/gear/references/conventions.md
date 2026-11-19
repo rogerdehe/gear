@@ -120,6 +120,7 @@ merge_batch = 1         # how many passed merges are merged together and gated o
 feature_branch = "{project}/feature/{feature}"  # the branch a feature's members merge into; a template that must name {feature}; default {project}/feature/{feature}
 feature_check = "make check"  # run on the feature branch after a member merges; default none
 feature_max_tasks = 10  # at most this many tasks in one feature; more is a voyage of its own; default 10
+standalone_max_tasks = 8  # a voyage may hold this many tasks outside any feature; more at departure, or an apply adding more, is refused without a `standalone:` decision; default 8, 0 = no check
 max_task_min = 60       # no task is planned longer than this; a plan that asks for more is refused
 branch_max_age_min = 120  # a task branch older than this is named to the captain
 branch_max_per_lane = 3   # more than lanes × this open-voyage task branches is named to the captain
