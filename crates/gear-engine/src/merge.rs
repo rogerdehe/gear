@@ -2991,6 +2991,16 @@ fn other_candidates(
                     .get(id)
                     .is_some_and(|(_, _, state)| *state == OpState::Confirmed)
             };
+            // A task outside any feature whose work landed another way (with
+            // a carrier's merge, a captain's `integrated-by=`) carries a merge
+            // time while its own merge op failed: it is on the integration
+            // branch as well (alfred M1, 2026-11-19: T-35 waited 1 h 50 for
+            // T-34, which had landed with T-57, and told nobody).
+            if tx.task_feature(project, &row.id)?.is_none()
+                && gear_app::tasks::work_landed(tx, project, &row.id)?
+            {
+                continue;
+            }
             if landed(&row.id) {
                 match tx.task_feature(project, &row.id)? {
                     None => continue,
@@ -3344,6 +3354,10 @@ const LOST_SCAN_EVERY_S: i64 = 300;
 /// Accepted work lands within this time, carried or not, or it is lost
 /// (user, 2026-11-04).
 const LAND_WITHIN_S: i64 = 2 * 3600;
+
+/// How long a merge may wait for passed tasks before the captain is told
+/// anyway: their own merges are normally a moment away.
+const WAIT_QUIET_S: i64 = 30 * 60;
 
 /// When the lost-merge scan last ran for a project.
 fn lost_scan_key(project: &str) -> String {
@@ -6888,9 +6902,20 @@ fn tell_captain_waiting(
         // Every task it waits for has passed and none of their own merges
         // failed: the wait is only about their own merge, which is a moment.
         // The captain has nothing to do.
-        if unpassed.is_empty() && failed.is_empty() {
+        // alfred M1, 2026-11-19: a "moment" that lasts is news after all —
+        // T-35 waited 1 h 50 for T-34 and the captain heard nothing.
+        let long = now - op.created >= WAIT_QUIET_S;
+        if unpassed.is_empty() && failed.is_empty() && !long {
             return Ok(());
         }
+        let body = if long && unpassed.is_empty() && failed.is_empty() {
+            format!(
+                "{body}\nit has waited {} min: check that their work really is not on the integration branch",
+                (now - op.created) / 60
+            )
+        } else {
+            body
+        };
         // And once per attempt: the captain was told about this wait already
         // (T-220). A resolved item does not bring the same news back on the
         // next tick.
@@ -17392,6 +17417,65 @@ gate = "{project_gate}"
             "the feature's branch is where it was"
         );
         assert!(origin_branches(&scratch.root).contains("heat/t5"));
+    }
+
+    /// alfred M1, 2026-11-19: T-34's own merge failed and its work landed
+    /// with T-57's, which gave its attempt a merge time. T-35's candidate
+    /// carried T-34's commits and its merge waited for T-34 for 1 h 50: a task
+    /// whose work landed is not one to wait for, whatever its own op says.
+    #[test]
+    fn a_task_whose_work_landed_another_way_is_not_waited_for() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let mut store = pair_world(&a, &b);
+        pass(&mut store, "T-1", &a, 10);
+        pass(&mut store, "T-2", &b, 11);
+        let waited = |store: &mut Store| {
+            other_candidates(store, "p", "T-2")
+                .unwrap()
+                .into_iter()
+                .any(|(task, _, _)| task == "T-1")
+        };
+        assert!(waited(&mut store), "an unlanded T-1 is waited for");
+        store
+            .write(|tx| {
+                for op in tx.ops_of_kind_in_states("p", OpKind::Merge, &[])? {
+                    if op.task.as_deref() == Some("T-1") {
+                        tx.set_op_state("p", &op.id, OpState::Failed, Some("conflict"), 12)?;
+                    }
+                }
+                gear_app::tasks::mark_integrated_by(tx, "p", "T-1", 1, "T-9", 20)
+            })
+            .unwrap();
+        assert!(!waited(&mut store), "T-1 landed with T-9's merge");
+    }
+
+    /// alfred M1, 2026-11-19: a merge waiting for passed tasks is quiet for a
+    /// while (their merges are a moment away), then tells the captain.
+    #[test]
+    fn a_long_wait_for_passed_tasks_is_told() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let mut store = pair_world(&a, &b);
+        let mut op = op(&b);
+        op.task = Some("T-2".into());
+        op.created = 100;
+        let blocked = vec![("T-1".to_string(), true)];
+        let items = |store: &mut Store| {
+            store
+                .read(|tx| tx.thread_messages("p", &wait_thread("T-2")))
+                .unwrap()
+        };
+        tell_captain_waiting(&mut store, "p", &op, &blocked, 100 + 600).unwrap();
+        assert!(items(&mut store).is_empty(), "a short wait is quiet");
+        tell_captain_waiting(&mut store, "p", &op, &blocked, 100 + WAIT_QUIET_S).unwrap();
+        let told = items(&mut store);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].body.contains("has waited 30 min"),
+            "{}",
+            told[0].body
+        );
     }
 
     /// T-627: a store with a feature's two members (T-1, T-2) and its
