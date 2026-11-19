@@ -686,10 +686,14 @@ fn merge_records(
     )
     .ok()
     .map(|tip| tip.trim().to_string());
-    if let Some(tip) = &tip {
-        if store.read(|tx| tx.get_meta(&key))?.as_deref() == Some(tip.as_str()) {
-            return Ok(None);
-        }
+    let merged = store.read(|tx| tx.get_meta(&key))?;
+    match (&tip, &merged) {
+        (Some(tip), Some(merged)) if tip == merged => return Ok(None),
+        // The landing's records are merged and GEAR deleted the branch: its
+        // absence now is that deletion, not a missing push (Selina M2.1: a
+        // scan after the merge named selina/captain/M2.2 and asked for a push).
+        (None, Some(_)) => return Ok(None),
+        _ => {}
     }
     let step = records_step(
         store, herdr, project, config, &repo, milestone, &branch, now,
@@ -2249,6 +2253,30 @@ merge_method = "merge"
         assert_eq!(landed.reclaim(NOW + 2 * RECLAIM_EVERY_S), None);
         assert_eq!(landed.dev_log(), after, "no second merge commit");
         assert_eq!(landed.origin_branches(), branches);
+    }
+
+    /// Selina M2.1: after the records merged and GEAR deleted the branch, the
+    /// next voyage's captain branch appeared on the remote. A later scan reads
+    /// the deleted branch as merged, not as a push the captain owes.
+    #[test]
+    fn merged_records_are_not_asked_for_again_once_the_branch_is_gone() {
+        let mut landed = Landed::new("gone");
+        landed.records("voyages/M1/report.md", "the voyage report");
+        assert!(landed.merge_records(NOW + 600).is_some());
+        assert!(!landed.origin_branches().contains(CAP));
+        sh(
+            &landed.root.path(),
+            &format!("git -C {} branch p/captain/M2 dev", landed.origin.display()),
+        );
+
+        assert_eq!(landed.merge_records(NOW + 900), None);
+
+        let open: Vec<_> = landed
+            .items(&records_thread("M1"))
+            .into_iter()
+            .filter(|item| item.state == MsgState::Open)
+            .collect();
+        assert!(open.is_empty(), "{open:?}");
     }
 
     /// T-619: a records commit pushed after the landing is merged on a later
