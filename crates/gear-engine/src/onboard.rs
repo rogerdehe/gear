@@ -305,23 +305,43 @@ fn settle_seat_branch(
     new: &str,
     now: Ts,
 ) -> Result<(), String> {
-    let old = gear_app::seat_branch::previous_default(&seat.project, &seat.name);
-    if old == new {
-        return Ok(());
-    }
     let dir = recorded
         .filter(|path| std::path::Path::new(path).is_dir())
         .unwrap_or(repo);
-    match gear_app::seat_branch::settle(dir, &old, new, &config.conventions.remote) {
-        Ok(gear_app::seat_branch::Settled::Free) => Ok(()),
-        Ok(gear_app::seat_branch::Settled::Renamed { old, new, remote }) => {
-            let body = format!(
-                "the branch of this seat is now {new} (it was {old}, the name the previous default gave it){remote}"
-            );
-            open_worktree_item(store, &seat.project, &seat.name, &body, now)
+    // The seat's own names that are not the current one: the previous
+    // default's (T-584), and the template's between voyages, which a lane
+    // started in the same tick as its voyage's departure keeps until it is
+    // moved (alfred M1, 2026-11-19: cli started on alfred/cli/between-voyages
+    // while the four lanes after it started on M1).
+    let olds = [
+        (
+            gear_app::seat_branch::previous_default(&seat.project, &seat.name),
+            "the name the previous default gave it",
+        ),
+        (
+            gear_model::branch::expand_seat(
+                &config.conventions.seat_branch,
+                &seat.project,
+                &seat.name,
+                "",
+            ),
+            "the name it had between voyages",
+        ),
+    ];
+    for (old, why) in olds {
+        if old == new {
+            continue;
         }
-        Err(reason) => Err(reason),
+        match gear_app::seat_branch::settle(dir, &old, new, &config.conventions.remote)? {
+            gear_app::seat_branch::Settled::Free => {}
+            gear_app::seat_branch::Settled::Renamed { old, new, remote } => {
+                let body =
+                    format!("the branch of this seat is now {new} (it was {old}, {why}){remote}");
+                return open_worktree_item(store, &seat.project, &seat.name, &body, now);
+            }
+        }
     }
+    Ok(())
 }
 
 /// T-565: settle every lane's seat branch of one project, once per
@@ -3341,7 +3361,19 @@ profile = "opencode"
     /// (`p/hull/M2`) at onboarding — beside it, never both.
     #[test]
     fn a_lane_on_the_previous_default_seat_branch_is_moved_to_the_voyage_branch() {
-        let root = crate::testtmp::temp("gear-onboard-t584");
+        lane_branch_moves_to_the_voyage_branch("home");
+    }
+
+    /// alfred M1, 2026-11-19: a lane started in the tick its voyage departed
+    /// stood on `p/hull/between-voyages` while the lanes after it stood on the
+    /// voyage's name. The next settle moves it to `p/hull/M2`.
+    #[test]
+    fn a_lane_on_the_between_voyages_seat_branch_is_moved_to_the_voyage_branch() {
+        lane_branch_moves_to_the_voyage_branch("between-voyages");
+    }
+
+    fn lane_branch_moves_to_the_voyage_branch(old: &str) {
+        let root = crate::testtmp::temp(&format!("gear-onboard-t584-{old}"));
         sh(&root, "git init -q -b dev work");
         let work = root.join("work");
         std::fs::write(work.join("a.txt"), "one\n").unwrap();
@@ -3350,7 +3382,10 @@ profile = "opencode"
             "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev",
         );
         // The lane's worktree, on the branch the previous default named.
-        sh(&work, "git worktree add -q -b p/hull/home ../p-hull dev");
+        sh(
+            &work,
+            &format!("git worktree add -q -b p/hull/{old} ../p-hull dev"),
+        );
         let worktree = root.join("p-hull");
 
         let config = format!(
@@ -3401,7 +3436,11 @@ profile = "opencode"
             .unwrap();
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("p/hull/home", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree(
+            &format!("p/hull/{old}"),
+            &worktree.to_string_lossy(),
+            "w1:p2",
+        );
 
         onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
@@ -3410,7 +3449,11 @@ profile = "opencode"
             "the voyage's name is a branch"
         );
         assert!(
-            git(&work, &["rev-parse", "--verify", "refs/heads/p/hull/home"]).is_err(),
+            git(
+                &work,
+                &["rev-parse", "--verify", &format!("refs/heads/p/hull/{old}")]
+            )
+            .is_err(),
             "the old name is gone, never beside the new one"
         );
         assert_eq!(
