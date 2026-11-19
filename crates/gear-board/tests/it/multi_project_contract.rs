@@ -121,7 +121,7 @@ fn last_frame(out: &str) -> String {
 fn two_projects_draw_a_bar_with_both_and_the_selected_one_bracketed() {
     let mut store = two_projects();
     let board = build(&mut store, &opts(), NOW).unwrap();
-    let text = frame::frame(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
+    let text = frame::frame(&board, &crate::screen(Tab::Tasks, 0, (160, 40)), None);
     let row = text.lines().next().unwrap_or_default();
     assert!(
         row.trim_start().starts_with("[gear · working"),
@@ -152,7 +152,7 @@ fn two_projects_draw_a_bar_with_both_and_the_selected_one_bracketed() {
 }
 
 #[test]
-fn the_bracket_key_switches_project_and_the_now_tab_follows() {
+fn the_bracket_key_switches_project_and_the_view_follows() {
     let mut store = two_projects();
     let mut out: Vec<u8> = Vec::new();
     run_with(
@@ -171,7 +171,7 @@ fn the_bracket_key_switches_project_and_the_now_tab_follows() {
     );
     assert!(
         text.contains("keel"),
-        "the Now tab shows the second project's lane: {text}"
+        "the view shows the second project's lane: {text}"
     );
     assert!(
         !text.contains("hull"),
@@ -191,7 +191,7 @@ fn one_project_draws_no_bar() {
     let mut store = Store::open_in_memory().unwrap();
     project(&mut store, "gear", "hull", "w1:p1", "M6", "T-1");
     let board = build(&mut store, &opts(), NOW).unwrap();
-    let text = frame::frame(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
+    let text = frame::frame(&board, &crate::screen(Tab::Tasks, 0, (160, 40)), None);
     let row = text.lines().next().unwrap_or_default();
     assert!(
         row.contains("GEAR · gear"),

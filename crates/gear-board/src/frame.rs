@@ -13,56 +13,54 @@ use crate::forecast;
 use crate::graph;
 use crate::idle::IdleReason;
 use crate::style::{lane_color, Color, Line, Style};
-use crate::{Board, LaneBoard, ProjectBoard, QuotaReading, QuotaWindow, TaskBoard, VoyageEntry};
+use crate::{Board, ProjectBoard, QuotaReading, QuotaWindow, TaskBoard, VoyageEntry};
 use std::collections::BTreeMap;
 
-/// The four views of the board: the tabs.
+/// The three views of the board: the tabs. The board opens on the Tasks view:
+/// a snapshot of what each lane does this minute answered nothing about how
+/// far the voyage is (the user, 2026-11-19), and Herdr already shows the
+/// panes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    /// The lanes, what they do now and what they have left.
-    Now,
     /// The work as a graph.
     Tasks,
-    /// The time and the tokens, per lane.
+    /// The time and the tokens, per lane, and the quota.
     Cost,
     /// The decisions of the captain.
     Log,
 }
 
 impl Tab {
-    /// The number of the tab (the keys 1 to 4).
+    /// The number of the tab (the keys 1 to 3).
     pub fn number(self) -> u8 {
         match self {
-            Tab::Now => 1,
-            Tab::Tasks => 2,
-            Tab::Cost => 3,
-            Tab::Log => 4,
+            Tab::Tasks => 1,
+            Tab::Cost => 2,
+            Tab::Log => 3,
         }
     }
 
     /// The title of the tab.
     pub fn title(self) -> &'static str {
         match self {
-            Tab::Now => "Now",
             Tab::Tasks => "Tasks",
             Tab::Cost => "Cost",
             Tab::Log => "Log",
         }
     }
 
-    /// The label of the tab on the tab row: `  1 Now  `, two spaces on each
+    /// The label of the tab on the tab row: `  1 Tasks  `, two spaces on each
     /// side of the key and the title (T-356).
     pub fn label(self) -> String {
         format!("  {} {}  ", self.number(), self.title())
     }
 
-    /// The tab of a number (the keys 1 to 4).
+    /// The tab of a number (the keys 1 to 3).
     pub fn of_number(number: u8) -> Option<Tab> {
         match number {
-            1 => Some(Tab::Now),
-            2 => Some(Tab::Tasks),
-            3 => Some(Tab::Cost),
-            4 => Some(Tab::Log),
+            1 => Some(Tab::Tasks),
+            2 => Some(Tab::Cost),
+            3 => Some(Tab::Log),
             _ => None,
         }
     }
@@ -70,26 +68,24 @@ impl Tab {
     /// The next tab (the right arrow).
     pub fn next(self) -> Tab {
         match self {
-            Tab::Now => Tab::Tasks,
             Tab::Tasks => Tab::Cost,
             Tab::Cost => Tab::Log,
-            Tab::Log => Tab::Now,
+            Tab::Log => Tab::Tasks,
         }
     }
 
     /// The tab before (the left arrow).
     pub fn previous(self) -> Tab {
         match self {
-            Tab::Now => Tab::Log,
-            Tab::Tasks => Tab::Now,
+            Tab::Tasks => Tab::Log,
             Tab::Cost => Tab::Tasks,
             Tab::Log => Tab::Cost,
         }
     }
 
     /// Every tab, in the order of the row.
-    pub fn all() -> [Tab; 4] {
-        [Tab::Now, Tab::Tasks, Tab::Cost, Tab::Log]
+    pub fn all() -> [Tab; 3] {
+        [Tab::Tasks, Tab::Cost, Tab::Log]
     }
 }
 
@@ -132,7 +128,7 @@ pub struct Layout {
 ///
 /// Short enough for an 80 column terminal: a row that is cut at the edge
 /// hides the end of it, and the end says how to leave.
-pub const FOOTER: &str = "←→ / Tab / 1-4 / click: views · click a voyage · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit";
+pub const FOOTER: &str = "←→ / Tab / 1-3 / click: views · click a voyage · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a task's rounds / a lane's tasks · q quit";
 
 /// A screen of characters: the frame, the view and the panel are drawn on it.
 ///
@@ -1437,9 +1433,8 @@ pub fn view(board: &Board, screen: &Screen, canvas: &mut Canvas, top: usize) -> 
         return Vec::new();
     };
     match screen.tab {
-        Tab::Now => view_now(project, board.now, screen, canvas, top),
         Tab::Tasks => view_tasks(project, board.now, screen, canvas, top),
-        Tab::Cost => view_cost(project, screen, canvas, top),
+        Tab::Cost => view_cost(project, board.now, screen, canvas, top),
         Tab::Log => view_decisions(project, screen, canvas, top),
     }
 }
@@ -1517,6 +1512,10 @@ fn view_tasks(
     canvas: &mut Canvas,
     top: usize,
 ) -> Vec<usize> {
+    // The voyage's labeled issues come first, above the graph: under it they
+    // fell below the screen on any graph taller than it, as the view scrolls
+    // only to the selected task.
+    let top = draw_issues(project, canvas, top);
     let lanes = task_lanes(project);
     let width = canvas.width();
     // One row per row of the graph: dev's line, the cells of the drawing, the
@@ -1720,6 +1719,7 @@ fn ratio_color(ratio: f64) -> Color {
 /// (T-363; the prototype's `view_cost`).
 fn view_cost(
     project: &ProjectBoard,
+    now: gear_model::Ts,
     screen: &Screen,
     canvas: &mut Canvas,
     top: usize,
@@ -1881,290 +1881,13 @@ fn view_cost(
         total.push_str(&format!(" (known so far; {unknown} unknown)"));
     }
     canvas.put_line(3, row, &Line::styled(total, Style::bold()));
+    draw_quota(project, now, canvas, row + 2);
     picks
 }
 
-/// The width of the Now view's task column (T-359): the prototype's
-/// `tw = max(30, min(52, wd - 110))`.
-fn project_tw(width: usize) -> usize {
-    width.saturating_sub(110).min(52).max(30)
-}
-
-/// The minutes a voyage has used, as the header measures them: from its
-/// departure to now while it sails, to its merge when it landed.
-fn voyage_used_minutes(voyage: Option<&crate::VoyageEntry>, now: gear_model::Ts) -> i64 {
-    let Some(voyage) = voyage else {
-        return 0;
-    };
-    let departure = voyage.departure.unwrap_or(now);
-    let end = if voyage.sailing {
-        now
-    } else {
-        voyage.ended.unwrap_or(now)
-    };
-    (end - departure).max(0) / 60
-}
-
-/// A text cut to `width` characters (the prototype's `[:width]`).
-fn cut(text: &str, width: usize) -> String {
-    text.chars().take(width).collect()
-}
-
-/// The clock of a decision: the time of its line (`2026-10-27 10:05` →
-/// `10:05`).
-fn clock_of(at: &str) -> &str {
-    at.rsplit(' ').next().unwrap_or(at)
-}
-
-/// The colour of a quota reading: red from 90 %, yellow from 60 %.
-fn quota_color(used_percent: f64) -> Color {
-    if used_percent >= 90.0 {
-        Color::Bad
-    } else if used_percent >= 60.0 {
-        Color::Warn
-    } else {
-        Color::Ok
-    }
-}
-
-/// The first view: the lanes, what needs a look, the quota and the done
-/// sentence.
-fn view_now(
-    project: &ProjectBoard,
-    now: gear_model::Ts,
-    screen: &Screen,
-    canvas: &mut Canvas,
-    top: usize,
-) -> Vec<usize> {
-    // T-359: one table, one row per lane (the prototype's `fn view_now`).
-    let tw = project_tw(canvas.width);
-    let voyage = project.shown.as_ref();
-    let sailing = voyage.is_some_and(|voyage| voyage.sailing);
-    let landed = voyage.is_some_and(|voyage| !voyage.sailing);
-    let used = voyage_used_minutes(voyage, now);
-
-    canvas.put_styled(3, top, "LANE", Style::bold());
-    canvas.put_styled(9, top, "NOW DOING", Style::bold());
-    canvas.put_styled(11 + tw, top, "STAGE", Style::bold());
-    canvas.put_styled(34 + tw, top, "TIME", Style::bold());
-    canvas.put_styled(46 + tw, top, "LANE DONE", Style::bold());
-    canvas.put_styled(76 + tw, top, "ENDS", Style::bold());
-    canvas.put_styled(
-        86 + tw,
-        top,
-        "(Enter: the lane's work)",
-        Style::fg(Color::Dim),
-    );
-
-    let mut picks = Vec::new();
-    let mut row = top + 1;
-    let mut ends: Vec<(usize, i64)> = Vec::new();
-    for (index, lane) in project.lanes.iter().enumerate() {
-        let picked = index == screen.selected;
-        // The mark stays in the accent colour, picked or not (the frame then
-        // lights the selected row).
-        canvas.put_styled(
-            1,
-            row,
-            if picked { "›" } else { " " },
-            Style::fg(Color::Acc),
-        );
-        canvas.put_styled(
-            3,
-            row,
-            &format!("{:<5}", lane.lane),
-            lane_style(project, &lane.lane).and_bold(),
-        );
-        // The lane's first open task in plan order is what it does now. A
-        // cancelled task is not work, whatever stage the graph still gives it
-        // (T-347's rule, the captain's answer M-6103).
-        match lane
-            .tasks
-            .iter()
-            .find(|task| task.state != gear_model::TaskState::Cancelled && task.stage.is_open())
-        {
-            Some(task) => {
-                let title = format!("{} {}", task.id, task.title);
-                canvas.put_styled(9, row, &cut(&title, tw), Style::PLAIN);
-                canvas.put_styled(
-                    11 + tw,
-                    row,
-                    &cut(&task.stage_words, 22),
-                    Style::fg(task.stage.color()),
-                );
-                let actual = task.actual_min.unwrap_or(0);
-                let estimate = task.est_min.unwrap_or(0);
-                let over = actual > estimate;
-                canvas.put_styled(
-                    34 + tw,
-                    row,
-                    &format!("{actual}/{estimate}m{}", if over { " ⚠" } else { "" }),
-                    if over {
-                        Style::fg(Color::Bad)
-                    } else {
-                        Style::PLAIN
-                    },
-                );
-            }
-            None => {
-                let (reason, style) = idle_reason_text(project, lane, landed);
-                canvas.put_styled(9, row, &cut(&reason, tw + 30), style);
-            }
-        }
-        // The lane's own progress: the merged tasks of the ones it shows (a
-        // cancelled task is not work), and the estimate still left.
-        let mine: Vec<&TaskBoard> = lane
-            .tasks
-            .iter()
-            .filter(|task| task.state != gear_model::TaskState::Cancelled)
-            .collect();
-        let merged = mine
-            .iter()
-            .filter(|task| task.stage == graph::Stage::Merged)
-            .count();
-        let left: i64 = mine
-            .iter()
-            .filter(|task| task.stage != graph::Stage::Merged)
-            .map(|task| task.est_min.unwrap_or(0))
-            .sum();
-        let k = merged * 10 / mine.len().max(1);
-        canvas.put_styled(
-            46 + tw,
-            row,
-            &format!("{}{}", "█".repeat(k), "░".repeat(10 - k)),
-            lane_style(project, &lane.lane),
-        );
-        canvas.put_styled(
-            57 + tw,
-            row,
-            &format!("{merged} of {} · {left}m left", mine.len()),
-            Style::PLAIN,
-        );
-        // When the lane ends: the time used plus its forecast from now.
-        if sailing {
-            if let Some(end) = project.forecast.iter().find(|end| end.lane == lane.lane) {
-                let end = used + end.end_min;
-                canvas.put_styled(76 + tw, row, &format!("~{}", hm(end)), Style::PLAIN);
-                ends.push((index, end));
-            }
-        }
-        picks.push(row);
-        row += 1;
-    }
-    // One line on whether the work is balanced: the first and the last lane
-    // to end, the first in lane order on a tie.
-    // One row has nothing to balance against (a captain alone, M7.2).
-    if sailing && ends.len() > 1 {
-        let mut first = ends[0];
-        let mut last = ends[0];
-        for end in &ends {
-            if end.1 < first.1 {
-                first = *end;
-            }
-            if end.1 > last.1 {
-                last = *end;
-            }
-        }
-        let gap = last.1 - first.1;
-        if gap <= 30 {
-            canvas.put_styled(
-                3,
-                row,
-                &format!("✔ balanced: every lane ends within {}", hm(gap)),
-                Style::fg(Color::Ok),
-            );
-        } else {
-            canvas.put_styled(
-                3,
-                row,
-                &format!(
-                    "✗ not balanced: {} ends {} after {}",
-                    project.lanes[last.0].lane,
-                    hm(gap),
-                    project.lanes[first.0].lane
-                ),
-                Style::fg(Color::Bad),
-            );
-        }
-    }
-    // The rest follows two rows below the balance line (T-360's block starts
-    // there).
-    // The rest starts two rows below the balance line (T-359, T-360): the
-    // items to handle, then the quota on one line, then the overlaps.
-    row = top + project.lanes.len() + 3;
-    // The items to handle: what needs a look, a lane that will sit idle, and a
-    // task that waits on someone — each with who acts.
-    let mut items: Vec<(&str, String, Style)> = Vec::new();
-    for text in needs_a_look(project) {
-        items.push(("⚠", text, Style::fg(Color::Warn)));
-    }
-    for lane in &project.forecast {
-        for (gap, dep) in &lane.waits {
-            if *gap < 20 {
-                continue;
-            }
-            let queue = project.lanes.iter().find(|board| board.lane == lane.lane);
-            // The lane's first task in plan order that depends on the blocker.
-            let next = queue.and_then(|board| {
-                board
-                    .tasks
-                    .iter()
-                    .filter(|task| task.deps.iter().any(|id| id == dep))
-                    .min_by_key(|task| (task.rank, task.id.as_str()))
-            });
-            let owner = project
-                .lanes
-                .iter()
-                .find(|board| board.tasks.iter().any(|task| &task.id == dep));
-            let (Some(next), Some(owner)) = (next, owner) else {
-                continue;
-            };
-            items.push((
-                "⚠",
-                format!(
-                    "{} will sit idle ~{}: its next task {} waits for {dep} ({}) — captain: \
-                     give {} work it can start now, or move {dep} to {}",
-                    lane.lane,
-                    hm(*gap),
-                    next.id,
-                    owner.lane,
-                    lane.lane,
-                    lane.lane
-                ),
-                Style::fg(Color::Bad),
-            ));
-        }
-    }
-    for text in &project.waiting_on {
-        items.push(("⏳", text.clone(), Style::PLAIN));
-    }
-    let heading = format!("TO HANDLE ({})", items.len());
-    let heading_style = if items.is_empty() {
-        Style::bold()
-    } else {
-        Style::fg(Color::Warn).and_bold()
-    };
-    canvas.put_styled(1, row, &heading, heading_style);
-    row += 1;
-    if items.is_empty() {
-        canvas.put_styled(3, row, "nothing", Style::fg(Color::Dim));
-        row += 1;
-    } else {
-        for (mark, text, style) in &items {
-            // The mark and the space after it carry its colour; the hourglass
-            // is a wide character, so its two continuation cells come first and
-            // the text starts one cell later, as a terminal draws it.
-            let lead = if *mark == "⏳" {
-                format!("{mark}  ")
-            } else {
-                format!("{mark} ")
-            };
-            canvas.put_styled(3, row, &lead, *style);
-            canvas.put_styled(3 + lead.chars().count(), row, text, *style);
-            row += 1;
-        }
-    }
-    row += 1;
+/// The quota on one line, a window after a window (T-360), at `row`: the
+/// close of the Cost view.
+fn draw_quota(project: &ProjectBoard, now: gear_model::Ts, canvas: &mut Canvas, row: usize) {
     // The quota on one line, a window after a window (T-360).
     canvas.put_styled(1, row, "Quota", Style::bold());
     let mut windows: Vec<(&QuotaReading, &QuotaWindow)> = project
@@ -2203,183 +1926,78 @@ fn view_now(
             x += text.chars().count() + 5;
         }
     }
-    row += 1;
-    // The overlaps with the integration branch (T-188): information lines.
-    // They never wait for the captain.
-    if !project.overlaps.is_empty() {
-        row += 1;
-        for overlap in &project.overlaps {
-            canvas.put_styled(1, row, &crate::overlap_line(overlap), Style::PLAIN);
-            row += 1;
-        }
-    }
-    // T-649: the voyage's labeled issues, one line per state that has any.
-    // Nothing when the voyage has none.
-    if !project.issues.is_empty() {
-        row += 1;
-        let heading = match project.issue_label.as_deref() {
-            Some(label) => format!("Issues ({label})"),
-            None => "Issues".to_string(),
-        };
-        canvas.put_styled(1, row, &heading, Style::bold());
-        row += 1;
-        for (state, numbers) in &project.issues {
-            let words = match state {
-                crate::issues::IssueState::Pending => "pending",
-                crate::issues::IssueState::Planned => "planned",
-                crate::issues::IssueState::InProgress => "in progress",
-                crate::issues::IssueState::Verifying => "awaiting verification",
-                crate::issues::IssueState::Done => "done",
-                crate::issues::IssueState::Deferred => "deferred",
-                crate::issues::IssueState::Unlabeled => "unlabeled",
-            };
-            let numbers: Vec<String> = numbers.iter().map(|number| format!("#{number}")).collect();
-            canvas.put_styled(
-                3,
-                row,
-                &format!("{words} {}", numbers.join(" ")),
-                Style::PLAIN,
-            );
-            row += 1;
-        }
-    }
-    picks
 }
 
-/// The words and the style of a lane that has nothing open (the prototype's
-/// `idle_reason`): the reason it sits, or what its next task waits for.
-fn idle_reason_text(project: &ProjectBoard, lane: &LaneBoard, landed: bool) -> (String, Style) {
-    if landed {
-        return (
-            crate::RETIRED_AT_THE_LANDING.to_string(),
-            Style::fg(Color::Dim),
-        );
+/// T-649: the voyage's labeled issues, one line per state that has any, from
+/// `row`, and one empty row after them: the head of the Tasks view. The row the
+/// graph starts at is returned; `row` itself when the voyage has none.
+fn draw_issues(project: &ProjectBoard, canvas: &mut Canvas, mut row: usize) -> usize {
+    if project.issues.is_empty() {
+        return row;
     }
-    // A lane that helps on the captain's instruction says so, in the accent
-    // colour, as it did before the table (T-323).
-    if let Some(helping) = &lane.helping {
-        return (helping.clone(), Style::fg(Color::Acc));
-    }
-    // A reason of the seat itself says what the lane is doing about it.
-    if matches!(
-        lane.idle,
-        Some(crate::idle::IdleReason::Quota { .. })
-            | Some(crate::idle::IdleReason::Parked { .. })
-            | Some(crate::idle::IdleReason::Held { .. })
-            | Some(crate::idle::IdleReason::Waiting { .. })
-    ) {
-        return (
-            lane.idle_text.clone().unwrap_or_default(),
-            Style::fg(Color::Bad),
-        );
-    }
-    // The next task of the lane: the first one in the plan's order whose
-    // dependencies are all merged — the rule the engine dispatches by (T-562).
-    // A cancelled task keeps the stage of a task never started, but it is not
-    // work.
-    let mut waiting: Vec<&TaskBoard> = lane
-        .tasks
-        .iter()
-        .filter(|task| {
-            task.state != gear_model::TaskState::Cancelled
-                && matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued)
-        })
-        .collect();
-    waiting.sort_by(|left, right| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    if let Some(next) = waiting
-        .iter()
-        .find(|task| task.deps_open.is_empty())
-        .copied()
-    {
-        // The captain's own task is never delivered: the captain takes it.
-        if lane.lane == crate::UNASSIGNED {
-            return (
-                format!("next {}: the captain's own", next.id),
-                Style::fg(Color::Acc),
-            );
-        }
-        return (
-            format!("next {} is ready but not delivered", next.id),
-            Style::fg(Color::Bad),
-        );
-    }
-    // Nothing can start: the first one in the plan says which dependency holds
-    // it (T-562).
-    let Some(next) = waiting.first().copied() else {
-        return (
-            "nothing left planned for this lane".to_string(),
-            Style::fg(Color::Bad),
-        );
+    let heading = match project.issue_label.as_deref() {
+        Some(label) => format!("Issues ({label})"),
+        None => "Issues".to_string(),
     };
-    if let Some(dep) = next.deps_open.first() {
-        if let Some((owner, task)) = project.lanes.iter().find_map(|owner| {
-            owner
-                .tasks
-                .iter()
-                .find(|task| &task.id == dep)
-                .map(|task| (owner, task))
-        }) {
-            return (
-                format!(
-                    "next {} waits for {} ({}, {})",
-                    next.id, dep, owner.lane, task.stage_words
-                ),
-                Style::fg(Color::Bad),
-            );
-        }
+    canvas.put_styled(1, row, &heading, Style::bold());
+    row += 1;
+    for (state, numbers) in &project.issues {
+        let words = match state {
+            crate::issues::IssueState::Pending => "pending",
+            crate::issues::IssueState::Planned => "planned",
+            crate::issues::IssueState::InProgress => "in progress",
+            crate::issues::IssueState::Verifying => "awaiting verification",
+            crate::issues::IssueState::Done => "done",
+            crate::issues::IssueState::Deferred => "deferred",
+            crate::issues::IssueState::Unlabeled => "unlabeled",
+        };
+        let numbers: Vec<String> = numbers.iter().map(|number| format!("#{number}")).collect();
+        canvas.put_styled(
+            3,
+            row,
+            &format!("{words} {}", numbers.join(" ")),
+            Style::PLAIN,
+        );
+        row += 1;
     }
-    (
-        format!("next {} is ready but not delivered", next.id),
-        Style::fg(Color::Bad),
-    )
+    row + 1
 }
 
-/// The things the captain should look at: a shown task that is still open and
-/// either took more than one round or ran past its estimate, in plan order.
-/// A merged task is history: the Time & tokens view keeps it (T-360).
-fn needs_a_look(project: &ProjectBoard) -> Vec<String> {
-    // The plan's order, not the lanes' grouping: the tasks flattened and
-    // sorted by rank, then id, as the store ranks them (F2 of the review).
-    let mut tasks: Vec<(&str, &TaskBoard)> = project
-        .lanes
-        .iter()
-        .flat_map(|lane| {
-            lane.tasks
-                .iter()
-                .map(move |task| (lane.lane.as_str(), task))
-        })
-        .collect();
-    tasks.sort_by(|(_, left), (_, right)| {
-        left.rank
-            .cmp(&right.rank)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let mut looks = Vec::new();
-    for (lane, task) in tasks {
-        // A cancelled task is not work, whatever stage its last attempt left
-        // (Lawrence M4: T-308 and T-314, cut at landing, read "round 3").
-        if !task.stage.is_open() || task.state == gear_model::TaskState::Cancelled {
-            continue;
-        }
-        let actual = task.actual_min.unwrap_or(0);
-        let estimate = task.est_min.unwrap_or(0);
-        if task.rounds > 1 {
-            looks.push(format!(
-                "{} {lane} round {}, {actual}/{estimate}m: the captain scopes what is left",
-                task.id, task.rounds
-            ));
-        } else if actual > estimate {
-            looks.push(format!(
-                "{} {lane} {actual}/{estimate}m, past its estimate: the captain scopes what is left",
-                task.id
-            ));
-        }
+/// The minutes a voyage has used, as the header measures them: from its
+/// departure to now while it sails, to its merge when it landed.
+fn voyage_used_minutes(voyage: Option<&crate::VoyageEntry>, now: gear_model::Ts) -> i64 {
+    let Some(voyage) = voyage else {
+        return 0;
+    };
+    let departure = voyage.departure.unwrap_or(now);
+    let end = if voyage.sailing {
+        now
+    } else {
+        voyage.ended.unwrap_or(now)
+    };
+    (end - departure).max(0) / 60
+}
+
+/// A text cut to `width` characters (the prototype's `[:width]`).
+fn cut(text: &str, width: usize) -> String {
+    text.chars().take(width).collect()
+}
+
+/// The clock of a decision: the time of its line (`2026-10-27 10:05` →
+/// `10:05`).
+fn clock_of(at: &str) -> &str {
+    at.rsplit(' ').next().unwrap_or(at)
+}
+
+/// The colour of a quota reading: red from 90 %, yellow from 60 %.
+fn quota_color(used_percent: f64) -> Color {
+    if used_percent >= 90.0 {
+        Color::Bad
+    } else if used_percent >= 60.0 {
+        Color::Warn
+    } else {
+        Color::Ok
     }
-    looks
 }
 
 /// Draw the panel over the frame: a box at the right of the screen, as the
@@ -2428,111 +2046,6 @@ fn row_cut(row: &Line, width: usize) -> Line {
         cut = cut.push(character.to_string(), style);
     }
     cut.pad(width)
-}
-
-/// The lane's panel: what it did, what it does now and what it has left.
-///
-/// `tasks` are the graph's records of the project (T-346): the panel shows the
-/// lane's own, each with the stage the store's facts gave it.
-pub fn lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask]) -> Vec<String> {
-    styled_lane_panel(lane, tasks, Color::Dim)
-        .into_iter()
-        .map(|line| line.text)
-        .collect()
-}
-
-/// Whether the graph task is in the lane's queue: a task a plan left without a
-/// lane is the captain's own and shows in the `capt` row.
-fn in_lane(task: &graph::GraphTask, lane: &str) -> bool {
-    if task.lane.is_empty() {
-        lane == crate::UNASSIGNED
-    } else {
-        task.lane == lane
-    }
-}
-
-/// The lane's panel in the prototype's colours; `color` is the lane's own.
-pub fn styled_lane_panel(lane: &LaneBoard, tasks: &[graph::GraphTask], color: Color) -> Vec<Line> {
-    let mine = || tasks.iter().filter(move |task| in_lane(task, &lane.lane));
-    let mut rows = vec![
-        Line::styled(format!("lane {}", lane.lane), Style::fg(color).and_bold()),
-        Line::new(),
-        Line::styled("DONE", Style::bold()),
-    ];
-    for task in mine().filter(|task| task.stage == graph::Stage::Merged) {
-        let rounds = if task.rounds > 1 {
-            format!(" {}r", task.rounds)
-        } else {
-            String::new()
-        };
-        rows.push(Line::styled(
-            format!(
-                "  {} {} {:<30} {}/{}m{}",
-                task.stage.symbol(),
-                task.id,
-                task.title.chars().take(30).collect::<String>(),
-                task.actual_min.unwrap_or(0),
-                task.est_min.unwrap_or(0),
-                rounds
-            ),
-            Style::fg(task.stage.color()),
-        ));
-    }
-    rows.push(Line::new());
-    rows.push(Line::styled("NOW", Style::bold()));
-    for task in mine().filter(|task| task.stage.is_open()) {
-        // The stage says what the task does now, in the prototype's words —
-        // the same words as the lane lines (T-347).
-        rows.push(Line::styled(
-            format!(
-                "  {} {} {:<30} {}",
-                task.stage.symbol(),
-                task.id,
-                task.title.chars().take(30).collect::<String>(),
-                graph::Stage::words_of(
-                    task.stage,
-                    &task.deps_open,
-                    task.deps.len(),
-                    task.rounds,
-                    task.moved_to.as_deref(),
-                    &task.integration
-                )
-            ),
-            Style::fg(task.stage.color()),
-        ));
-    }
-    rows.push(Line::new());
-    rows.push(Line::styled("LEFT, in order", Style::bold()));
-    let mut left = 0;
-    let mut minutes = 0;
-    for task in
-        mine().filter(|task| matches!(task.stage, graph::Stage::Deps | graph::Stage::Queued))
-    {
-        left += 1;
-        minutes += task.est_min.unwrap_or(0);
-        let needs = if task.deps.is_empty() {
-            String::new()
-        } else {
-            format!("  needs {}", task.deps.join(","))
-        };
-        rows.push(Line::plain(format!(
-            "  ○ {} {:<30} {}m{}",
-            task.id,
-            task.title.chars().take(30).collect::<String>(),
-            task.est_min.unwrap_or(0),
-            needs
-        )));
-    }
-    rows.push(Line::styled(
-        format!("left: {left} tasks, {minutes}m of estimates"),
-        Style::fg(Color::Dim),
-    ));
-    rows
-}
-
-/// The colour of a lane of the project (its panel's title).
-pub fn lane_color_of(project: &ProjectBoard, lane: &str) -> Color {
-    lane_color(&lane_order(project), lane)
 }
 
 /// A bar of `width` cells: how much of `total` is `part`.

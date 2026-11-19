@@ -483,7 +483,7 @@ fn enter_opens_a_lane_and_closes_it() {
         &mut store,
         &opts,
         &mut out,
-        &mut Presses(vec!['3', '\r']),
+        &mut Presses(vec!['2', '\r']),
         None,
     )
     .unwrap();
@@ -500,7 +500,7 @@ fn enter_opens_a_lane_and_closes_it() {
         &mut store,
         &opts,
         &mut out,
-        &mut Presses(vec!['3', '\r', '\r']),
+        &mut Presses(vec!['2', '\r', '\r']),
         None,
     )
     .unwrap();
@@ -1117,7 +1117,7 @@ fn down_moves_over_the_reason_of_a_decision() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    let mut keys = Presses(vec!['4', 'j', 'j']);
+    let mut keys = Presses(vec!['3', 'j', 'j']);
 
     run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
 

@@ -5,7 +5,7 @@
 //! information lines: they never wait for the captain, and a cleared key
 //! shows nothing.
 
-use gear_board::{build, frame, integration_overlaps, render, Options, View};
+use gear_board::{build, integration_overlaps, render, Options, View};
 use gear_model::SeatRole;
 use gear_store::{testing, Store};
 
@@ -52,7 +52,7 @@ fn options() -> Options {
 }
 
 #[test]
-fn one_overlap_is_one_line_on_the_board_and_in_the_frame() {
+fn one_overlap_is_one_line_on_the_board() {
     let mut store = world();
     seed_overlap(
         &mut store,
@@ -67,13 +67,6 @@ fn one_overlap_is_one_line_on_the_board_and_in_the_frame() {
     assert!(
         text.contains("overlap: T-2 shares crates/gear-board/src/lib.rs with dev"),
         "{text}"
-    );
-
-    // The interactive frame shows the same line.
-    let screen = frame::frame(&board, &crate::screen(frame::Tab::Now, 0, (120, 40)), None);
-    assert!(
-        screen.contains("overlap: T-2 shares crates/gear-board/src/lib.rs with dev"),
-        "{screen}"
     );
 
     // The overlaps are the ones the scan wrote.
@@ -126,9 +119,6 @@ fn a_cleared_overlap_shows_nothing() {
     let text = render(&board, View::Lanes);
     assert!(!text.contains("overlap:"), "{text}");
 
-    let screen = frame::frame(&board, &crate::screen(frame::Tab::Now, 0, (120, 40)), None);
-    assert!(!screen.contains("overlap:"), "{screen}");
-
     assert!(integration_overlaps(&mut store, "p").unwrap().is_empty());
 }
 
@@ -174,7 +164,4 @@ fn the_bookkeeping_keys_of_the_scan_are_not_overlaps() {
     let board = build(&mut store, &options(), T0 + 60).unwrap();
     let text = render(&board, View::Lanes);
     assert!(!text.contains("overlap:"), "{text}");
-
-    let screen = frame::frame(&board, &crate::screen(frame::Tab::Now, 0, (120, 40)), None);
-    assert!(!screen.contains("overlap:"), "{screen}");
 }

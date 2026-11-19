@@ -281,8 +281,8 @@ pub struct ProjectBoard {
     pub forecast: Vec<forecast::LaneEnd>,
     /// What the shown tasks wait on, in plan order (T-360): a task in review
     /// names the reviewer and how long it has held it, a task that waits for
-    /// the captain names what he owes. The board's Now view lists them as items
-    /// to handle, each with who acts.
+    /// the captain names what he owes. The board's JSON carries them (the
+    /// frame's Now view that listed them is gone, the user, 2026-11-19).
     pub waiting_on: Vec<String>,
     /// Every voyage of the project that departed, newest departure first
     /// (T-350): the board can be built for any of them.
@@ -296,7 +296,8 @@ pub struct ProjectBoard {
     /// nowhere.
     pub moved_out: Vec<(String, String)>,
     /// The labeled GitHub issues of the shown voyage (T-649), by state, in the
-    /// order the Now view lists them; empty when the voyage has none.
+    /// order the Tasks view lists them under its graph; empty when the voyage
+    /// has none.
     pub issues: Vec<(issues::IssueState, Vec<i64>)>,
     /// The voyage label the issues block names (T-649): the project's
     /// `[github.issues].voyage_label` with the project and milestone filled in;
@@ -1086,8 +1087,8 @@ pub fn project_for(
             .then_with(|| left.op.cmp(&right.op))
     });
 
-    // What the shown tasks wait on, in plan order (T-360): the Now view lists
-    // it under the lanes, each item with who acts. A task in review names the
+    // What the shown tasks wait on, in plan order (T-360), each item with who
+    // acts (the board's JSON carries it). A task in review names the
     // reviewer holding it and how long it has held it; a task that waits for
     // the captain names what he owes.
     let mut ordered: Vec<(&str, &TaskBoard)> = Vec::new();
@@ -1279,7 +1280,7 @@ pub fn project_for(
 }
 
 /// T-649: the shown voyage's labeled issues grouped by state, in the order the
-/// Now view lists them (pending, planned, in progress, awaiting verification,
+/// Tasks view lists them (pending, planned, in progress, awaiting verification,
 /// done, deferred, unlabeled). Empty when the voyage has no issue.
 fn issue_rows(
     tx: &Tx<'_>,
@@ -2897,17 +2898,13 @@ pub fn run_with(
     }
 }
 
-/// The tab the board starts in: the old views of the board map to the tabs of
-/// the new one (the lanes are the first view, the dependencies are the graph).
-fn tab_of(view: View) -> frame::Tab {
-    match view {
-        View::Deps | View::Graph => frame::Tab::Tasks,
-        View::Lanes => frame::Tab::Now,
-    }
+/// The tab the board starts in: every old view of the board opens on the
+/// Tasks view, where the voyage's progress is (the user, 2026-11-19).
+fn tab_of(_view: View) -> frame::Tab {
+    frame::Tab::Tasks
 }
 
-/// The panel of the selected row: the lane's work in the first view, the
-/// rounds of the task in the graph.
+/// The panel of the selected row: the rounds of the task in the graph.
 fn open_panel(
     board: &Board,
     store: &mut Store,
@@ -2919,13 +2916,6 @@ fn open_panel(
         return Ok(None);
     };
     match tab {
-        frame::Tab::Now => Ok(project.lanes.get(selected).map(|lane| {
-            frame::styled_lane_panel(
-                lane,
-                &project.graph,
-                frame::lane_color_of(project, &lane.lane),
-            )
-        })),
         frame::Tab::Tasks => {
             // The task of the selected pick: the row the graph draws for it.
             let picks = frame::task_picks(project, board.now, width);

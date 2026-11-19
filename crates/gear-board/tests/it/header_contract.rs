@@ -151,7 +151,7 @@ fn drawn(store: &mut Store) -> (gear_board::Board, Screen, Canvas, Vec<String>) 
     )
     .unwrap();
     let screen = Screen {
-        tab: Tab::Now,
+        tab: Tab::Tasks,
         selected: 0,
         detail: false,
         opened: Vec::new(),
@@ -309,7 +309,7 @@ fn the_folded_header_gives_the_check_the_milestone_the_time_and_the_tasks() {
         rows[head.tab_row - 1]
     );
     assert!(
-        rows[head.tab_row].contains("1 Now"),
+        rows[head.tab_row].contains("1 Tasks"),
         "the tab row follows the rules"
     );
     assert!(
@@ -456,11 +456,8 @@ fn the_d_key_unfolds_the_header_and_keeps_the_selection() {
     // time and the tasks with their legends and the key that folds them again;
     // the selection stays on the row the user picked.
     let mut store = world();
-    let folded = run_events(&mut store, vec![Event::Key('2'), Event::Key('j')]);
-    let unfolded = run_events(
-        &mut store,
-        vec![Event::Key('2'), Event::Key('j'), Event::Key('d')],
-    );
+    let folded = run_events(&mut store, vec![Event::Key('j')]);
+    let unfolded = run_events(&mut store, vec![Event::Key('j'), Event::Key('d')]);
     assert_ne!(
         last_frame(&unfolded),
         last_frame(&folded),
@@ -481,7 +478,7 @@ fn the_d_key_unfolds_the_header_and_keeps_the_selection() {
     let lit: Vec<usize> = rows
         .iter()
         .enumerate()
-        .filter(|(y, line)| *y != 0 && !line.contains("1 Now") && line.contains("\u{1b}[7m"))
+        .filter(|(y, line)| *y != 0 && !line.contains("1 Tasks") && line.contains("\u{1b}[7m"))
         .map(|(y, _)| y)
         .collect();
     assert_eq!(lit.len(), 1, "one lit row, the selection: {frame_text}");
@@ -527,7 +524,7 @@ fn an_unfolded_tasks_row_names_the_tasks_that_moved_out() {
     );
 
     let screen = Screen {
-        tab: Tab::Now,
+        tab: Tab::Tasks,
         selected: 0,
         detail: true,
         opened: Vec::new(),
@@ -709,7 +706,7 @@ fn unfolded(store: &mut Store) -> (gear_board::Board, Canvas, Vec<String>) {
     )
     .unwrap();
     let screen = Screen {
-        tab: Tab::Now,
+        tab: Tab::Tasks,
         selected: 0,
         detail: true,
         opened: Vec::new(),
@@ -907,7 +904,7 @@ fn a_done_task_without_a_merge_time_counts_as_passed_not_on_the_branch() {
     .unwrap();
     // A wide screen: the folded row's words are not cut before the counts.
     let screen = Screen {
-        tab: Tab::Now,
+        tab: Tab::Tasks,
         selected: 0,
         detail: false,
         opened: Vec::new(),
