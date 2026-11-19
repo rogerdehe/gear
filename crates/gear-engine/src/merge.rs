@@ -3700,7 +3700,22 @@ fn feature_target(
     else {
         return Ok(None);
     };
-    let own = config.repo_of_task(&row).integration;
+    // The repo's own integration branch, from the config: `repo_of_task`
+    // already puts a task's base in its place, so comparing with it would
+    // never see a feature (alfred M1, 2026-11-19: T-49's merge into
+    // alfred/feature/f-2 was taken for an ordinary merge and waited 25
+    // minutes for the integration worktree a train held).
+    let own = match row.repo.as_deref() {
+        Some(path) => match config.repos().into_iter().find(|repo| repo.path == path) {
+            Some(repo) => repo.integration,
+            None => return Ok(None),
+        },
+        None => {
+            config
+                .repo_of_lane(row.lane.as_deref().unwrap_or_default())
+                .integration
+        }
+    };
     Ok((base != own).then(|| base.to_string()))
 }
 
@@ -17440,6 +17455,53 @@ gate = "{project_gate}"
             ),
         );
         path
+    }
+
+    /// alfred M1, 2026-11-19: a member planned since v6 carries its repo as
+    /// well as its base, and `repo_of_task` puts the base in the repo's
+    /// place; the feature target is still the feature's branch, so the merge
+    /// takes the feature's worktree beside the train.
+    #[test]
+    fn a_member_with_its_repo_recorded_still_targets_its_feature() {
+        let pair = Pair::new("feature-target-repo", false);
+        let mut store = feature_store(
+            &pair.work,
+            "false",
+            "T-1",
+            Some("p/feature/f-1"),
+            Some("true"),
+            None,
+            &pair.a,
+        );
+        let config = parsed_config("false", &pair.work);
+        let root = config.root_repo();
+        store
+            .write(|tx| {
+                let mut row = tx.get_task("p", "T-1")?.unwrap();
+                row.repo = Some(root.path.clone());
+                tx.update_task(&row)
+            })
+            .unwrap();
+        let op = OpRow {
+            task: Some("T-1".into()),
+            ..op(&pair.a)
+        };
+        assert_eq!(
+            feature_target(&mut store, "p", &op, &config).unwrap(),
+            Some("p/feature/f-1".to_string())
+        );
+        store
+            .write(|tx| {
+                let mut row = tx.get_task("p", "T-1")?.unwrap();
+                row.base = Some(root.integration.clone());
+                tx.update_task(&row)
+            })
+            .unwrap();
+        assert_eq!(
+            feature_target(&mut store, "p", &op, &config).unwrap(),
+            None,
+            "a task on the repo's own branch is no feature merge"
+        );
     }
 
     /// T-627: a member of a feature merges into the feature's branch in its

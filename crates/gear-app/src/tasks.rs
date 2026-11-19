@@ -1273,10 +1273,18 @@ pub fn settle_review(
     // puts the task back on Ready so the captain can add the fix tasks to its
     // deps; both are plan `# Verdicts` lines.
     if tx.task_audit(project, task)?.is_some() {
+        // The attempt stays Submitted until the captain rules, so every tick
+        // comes back here: the captain is told once per attempt (alfred M1,
+        // 2026-11-19: T-30's audit verdict rang eleven times in a minute).
+        let told = format!("audit_verdict_told:{project}:{task}:{attempt}");
+        if tx.get_meta(&told)?.is_some() {
+            return Ok(());
+        }
         let line =
             format!("{task}: audit review is in — the captain rules (the task stays Verifying)");
         resolve_review_items(tx, project, task, attempt, &line, now)?;
         tell_captain_cap(tx, project, task, attempt, &line, now)?;
+        tx.set_meta(&told, &now.to_string())?;
         return Ok(());
     }
 
