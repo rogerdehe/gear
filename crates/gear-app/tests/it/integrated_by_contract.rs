@@ -599,3 +599,49 @@ fn a_candidate_that_differs_in_a_code_file_is_still_refused() {
     let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
     assert_eq!(times.merged, None, "nothing was settled");
 }
+
+/// alfred M1, 2026-11-19: under squash merges the integrator lands a new
+/// commit, so a candidate it carried is no ancestor of the integration
+/// branch. A candidate inside the integrator's accepted candidate (the lane's
+/// commit before the squash) landed with it and is accepted; one that is not
+/// inside it is still refused.
+#[test]
+fn a_candidate_inside_the_integrators_accepted_candidate_is_accepted() {
+    let repos = Repos::new();
+    let candidate = repos.side_commit("side-carried", "src/heat/x.rs", "the work\n");
+    git(&repos.repo, &["checkout", "-q", "side-carried"]);
+    std::fs::write(repos.repo.join("src/heat/y.rs"), "the landing\n").unwrap();
+    git(&repos.repo, &["add", "src/heat/y.rs"]);
+    git(&repos.repo, &["commit", "-q", "-m", "the landing task"]);
+    let carrier = git(&repos.repo, &["rev-parse", "HEAD"]);
+    git(&repos.repo, &["checkout", "-q", "dev"]);
+    let mut s = world(&repos, &candidate);
+    let accept_carrier = |s: &mut Store, sha: &str| {
+        s.write(|tx| {
+            let mut attempt = tx.get_attempt("p", "T-2", 1)?.unwrap();
+            attempt.candidate = Some(sha.to_string());
+            attempt.state = gear_model::AttemptState::Accepted;
+            tx.update_attempt(&attempt)
+        })
+        .unwrap();
+    };
+    let text = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={candidate} pass evidence=ops/reports/T-1.md integrated-by=T-2\n"
+    );
+
+    // T-2's accepted candidate does not hold T-1's: refused.
+    let other = repos.side_commit("side-other", "src/heat/z.rs", "other\n");
+    accept_carrier(&mut s, &other);
+    let err = run(&mut s, &text, "r1").unwrap_err();
+    assert!(
+        err.detail.contains("nor inside T-2's accepted candidate"),
+        "{}",
+        err.detail
+    );
+
+    // It does: accepted, marked merged by T-2's merge.
+    accept_carrier(&mut s, &carrier);
+    run(&mut s, &text, "r2").unwrap();
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, Some(NOW + 10), "marked merged by T-2's merge");
+}
