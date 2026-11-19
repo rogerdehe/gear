@@ -1092,6 +1092,16 @@ fn settle_report(
         }
         // The worker already retried a reason that can clear (T-61): what
         // comes back is the failure that stands.
+        Report::Failed(failed) if gate_retry_first(store, project, op, &failed.reason, at)? => {
+            let first = failed.reason.lines().next().unwrap_or_default();
+            requeue_merge(
+                store,
+                project,
+                op,
+                &format!("{first} — queued once more before the captain is told"),
+                at,
+            )?;
+        }
         Report::Failed(failed) => {
             fail_merge(store, project, op, &failed.reason, at)?;
             // T-598: a feature's integration task whose full gate said no gets
@@ -1476,6 +1486,35 @@ fn retry_merge(
             tx.set_op_state(project, &op.id, OpState::Unknown, Some(reason), now)?;
         }
         Ok(())
+    })
+}
+
+/// Whether a failed gate is this attempt's first: then the merge is queued
+/// once more and nobody is told. A gate also fails for what clears by itself
+/// on a loaded machine (alfred M1, 2026-11-19: the gate's PostgreSQL in
+/// recovery, a suite over its time budget), and each such failure cost the
+/// captain a `- remerge`. A real failure fails again and is told then; a
+/// conflict or any other step is told at once, as before.
+fn gate_retry_first(
+    store: &mut Store,
+    project: &str,
+    op: &OpRow,
+    reason: &str,
+    now: Ts,
+) -> GearResult<bool> {
+    let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+        return Ok(false);
+    };
+    if !reason.starts_with("gate failed") {
+        return Ok(false);
+    }
+    let key = format!("engine.gate_retried.{project}.{task}.{attempt}");
+    store.write(|tx| {
+        if tx.get_meta(&key)?.is_some() {
+            return Ok(false);
+        }
+        tx.set_meta(&key, &now.to_string())?;
+        Ok(true)
     })
 }
 
@@ -7836,6 +7875,19 @@ fn tell_captain_lost(
             })?;
             continue;
         }
+        // An open merge-failed item already says the merge failed and names
+        // the remerge: a second item for the same fact only rings twice
+        // (alfred M1, 2026-11-19: every failed merge was followed 5 s later
+        // by "nothing will merge it").
+        let failed_open = store.read(|tx| {
+            Ok(tx
+                .thread_messages(project, &failed_thread(&task))?
+                .iter()
+                .any(|item| matches!(item.state, MsgState::Open | MsgState::Waiting)))
+        })?;
+        if failed_open && carried.is_none() {
+            continue;
+        }
         // T-615: a carrier that landed without this work is named, with the
         // way out: clear the mark and remerge the task alone.
         let body = match &carried {
@@ -9077,14 +9129,17 @@ mod tests {
     fn a_failed_merge_is_retried_from_the_plan_and_its_item_closes() {
         let scratch = Scratch::new("remerge");
         let marker = scratch.root.join("gate-ran");
+        // The gate fails twice: the engine's own retry fails too, and only
+        // then is the captain told.
         let gate = format!(
-            "if [ ! -e '{marker}' ]; then touch '{marker}'; echo the flaky test >&2; exit 1; fi",
+            "if [ ! -e '{marker}.2' ]; then if [ -e '{marker}' ]; then touch '{marker}.2'; fi; touch '{marker}'; echo the flaky test >&2; exit 1; fi",
             marker = marker.display()
         );
         let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
         accept(&mut store, "T-5", 0);
 
-        // The first merge fails on the gate; nothing is pushed.
+        // The first merge fails on the gate, and so does its retry; nothing is
+        // pushed.
         let merged = wait_merge(&mut store, &mut herdr, &cfg);
         assert!(merged.is_empty(), "{merged:?}");
         let op = merge_op(&mut store);
@@ -9118,6 +9173,30 @@ mod tests {
             .read(|tx| tx.actionable_for("p", "p:captain", 60))
             .unwrap();
         assert!(inbox.is_empty(), "the item is settled: {inbox:?}");
+    }
+
+    /// alfred M1, 2026-11-19: a gate that fails once for what clears by itself
+    /// (the gate's database in recovery, a suite over its time on a loaded
+    /// machine) is run once more by the engine: the merge lands and the
+    /// captain is never told.
+    #[test]
+    fn a_gate_that_fails_once_is_retried_and_lands_without_an_item() {
+        let scratch = Scratch::new("gate-retry");
+        let marker = scratch.root.join("gate-ran");
+        let gate = format!(
+            "if [ ! -e '{marker}' ]; then touch '{marker}'; echo the database is in recovery >&2; exit 1; fi",
+            marker = marker.display()
+        );
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
+        accept(&mut store, "T-5", 0);
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+        });
+        assert!(scratch.dev_has_task_commit(), "the retry landed");
+        let failed = store
+            .read(|tx| tx.thread_messages("p", &failed_thread("T-5")))
+            .unwrap();
+        assert!(failed.is_empty(), "nobody was told: {failed:?}");
     }
 
     /// T-92: a merge that is already in flight or merged has nothing to retry,
@@ -9229,6 +9308,29 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// alfred M1, 2026-11-19: a failed merge whose merge-failed item is still
+    /// open gets no second item saying the same: the open item already names
+    /// the remerge. Once the captain settles it, the lost scan speaks again.
+    #[test]
+    fn a_failed_merge_with_its_item_open_is_not_named_lost_too() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        store
+            .write(|tx| {
+                let item = tx.thread_messages("p", &failed_thread("T-5"))?.remove(0);
+                tx.update_message_state("p", &item.id, MsgState::Open, None, None, None, 11)
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let lost = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(lost.is_empty(), "{lost:?}");
     }
 
     /// A lost item closes once a merge of the task is queued again: the merge
@@ -13501,6 +13603,19 @@ gate = "{gate}"
         merged
     }
 
+    /// The gate's one automatic retry of `task`'s attempts is spent: a test of
+    /// what a red gate starts sees the failure on the first run.
+    fn gate_retry_spent(store: &mut Store, task: &str) {
+        store
+            .write(|tx| {
+                for attempt in 1..=5 {
+                    tx.set_meta(&format!("engine.gate_retried.p.{task}.{attempt}"), "0")?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
     fn wait_merge(
         store: &mut Store,
         herdr: &mut gear_herdr::fake::FakeHerdr,
@@ -17604,6 +17719,7 @@ gate = "{project_gate}"
             &tip,
         );
         let cfg = fixture_cfg();
+        gate_retry_spent(&mut store, "T-9");
 
         // The integration task merges the feature branch, and its gate says no:
         // the second member's file is in the tree.
@@ -17670,6 +17786,7 @@ gate = "{project_gate}"
             &tip,
         );
         let cfg = fixture_cfg();
+        gate_retry_spent(&mut store, "T-9");
 
         let mut seen = cfg.merges.progress();
         merge_step(&mut store, &mut herdr, &cfg, 20);
@@ -17709,6 +17826,7 @@ gate = "{project_gate}"
         bisect_worktrees(&pair, &mut herdr);
         let mut store = feature_store(&pair.work, "false", "T-1", None, None, None, &pair.a);
         let cfg = fixture_cfg();
+        gate_retry_spent(&mut store, "T-1");
 
         // The merge fails the project's gate, as any normal task's can, and the
         // captain's item says so.
@@ -17762,6 +17880,7 @@ gate = "{project_gate}"
         let third = add_third_task(&mut store, &pair);
         pass(&mut store, "T-3", &third, 10);
         let cfg = fixture_cfg();
+        gate_retry_spent(&mut store, "T-9");
 
         // The feature's merge fails its gate; the tick after it starts the
         // bisect, and the one after that merges the ordinary task.
