@@ -2571,11 +2571,35 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
                 && changed
                     .iter()
                     .all(|path| under_voyage(path, &repo.voyage_dir, &project));
-            if !only_voyage {
+            // alfred M1, 2026-11-19: under `merge_method = "squash"` the
+            // integrator lands a new commit, so no candidate it carried is an
+            // ancestor of the integration branch. The work landed with it
+            // when the candidate is inside the integrator's accepted
+            // candidate, the lane's commit before the squash (T-34 inside
+            // T-57's; T-17's accepted rework was not inside T-61's).
+            let inside = !only_voyage && {
+                let carrier = store.read(|tx| {
+                    Ok(tx
+                        .attempts_of_task(&project, by)?
+                        .into_iter()
+                        .filter(|attempt| attempt.state == gear_model::AttemptState::Accepted)
+                        .filter_map(|attempt| attempt.candidate)
+                        .collect::<Vec<String>>())
+                })?;
+                carrier.iter().any(|carrier| {
+                    Command::new("git")
+                        .arg("-C")
+                        .arg(dir)
+                        .args(["merge-base", "--is-ancestor", candidate, carrier])
+                        .status()
+                        .is_ok_and(|status| status.success())
+                })
+            };
+            if !only_voyage && !inside {
                 return Err(bad(
                     0,
                     format!(
-                        "{task}: the candidate {candidate} is not in {}: a pass may name the task whose merge landed the work only when that work is in the integration branch",
+                        "{task}: the candidate {candidate} is not in {} nor inside {by}'s accepted candidate: a pass may name the task whose merge landed the work only when that work is in the integration branch",
                         repo.integration
                     ),
                 ));
