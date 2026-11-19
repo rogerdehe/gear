@@ -100,33 +100,45 @@ impl ProjectConfig {
         }
     }
 
-    /// A task keeps the repository, base and gate fixed at creation, even if
-    /// its lane later moves. Legacy tasks without a snapshot use the lane.
+    /// A task keeps the repository and base fixed at creation, even if its
+    /// lane later moves. Legacy tasks without a snapshot use the lane.
+    ///
+    /// The gate is the repository's current one for a task that lands on that
+    /// repository's integration branch: a gate the config changes reaches the
+    /// tasks already planned (alfred M1, 2026-11-19: `gate` moved to the CI
+    /// runners and every task kept running `make gate` here). The task's own
+    /// gate stands only where its target is its own: a feature member's check
+    /// on the feature branch, or a repository the config no longer names.
     pub fn repo_of_task(&self, task: &gear_store::TaskRow) -> Repo {
-        let Some(path) = task.repo.as_deref() else {
-            return self.repo_of_lane(task.lane.as_deref().unwrap_or_default());
+        let named = match task.repo.as_deref() {
+            Some(path) => self.repos().into_iter().find(|r| r.path == path),
+            None => Some(self.repo_of_lane(task.lane.as_deref().unwrap_or_default())),
         };
-        let mut repo = self
-            .repos()
-            .into_iter()
-            .find(|r| r.path == path)
-            .unwrap_or_else(|| {
-                // A removed repo is still a valid historical target. Do not use a
-                // different repo's GitHub settings or worker key for it.
-                let mut hash = 0xcbf29ce484222325u64;
-                for b in path.bytes() {
-                    hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3);
-                }
-                let mut fallback = self.root_repo();
-                fallback.name = format!("snapshot-{hash:x}");
-                fallback.path = path.to_string();
-                fallback.github = None;
-                fallback
-            });
-        if let Some(base) = &task.base {
+        let path = task.repo.as_deref().unwrap_or_default();
+        let follows_config = named.as_ref().is_some_and(|repo| {
+            task.base
+                .as_deref()
+                .is_none_or(|base| base == repo.integration)
+        });
+        let mut repo = named.unwrap_or_else(|| {
+            // A removed repo is still a valid historical target. Do not use a
+            // different repo's GitHub settings or worker key for it.
+            let mut hash = 0xcbf29ce484222325u64;
+            for b in path.bytes() {
+                hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3);
+            }
+            let mut fallback = self.root_repo();
+            fallback.name = format!("snapshot-{hash:x}");
+            fallback.path = path.to_string();
+            fallback.github = None;
+            fallback
+        });
+        // A task of before v6 reads its lane's branch here, as it always did:
+        // a caller that merges it applies its base itself.
+        if let Some(base) = task.base.as_ref().filter(|_| task.repo.is_some()) {
             repo.integration = base.clone();
         }
-        if let Some(gate) = &task.gate {
+        if let Some(gate) = task.gate.as_ref().filter(|_| !follows_config) {
             repo.gate = gate.clone();
         }
         repo
@@ -2747,6 +2759,53 @@ pub fn owns_path(owns: &[String], path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// alfred M1, 2026-11-19: a task planned before `gate` changed runs the
+    /// new gate on its repository's integration branch; a feature member keeps
+    /// its feature's check, and a repository the config no longer names keeps
+    /// the gate the task was planned with.
+    #[test]
+    fn a_task_runs_the_configs_current_gate_unless_its_target_is_its_own() {
+        let config = parse(
+            "[project]\nid = \"p\"\nherdr_session = \"s\"\nrepo = \"/repo\"\n\n\
+             [quota]\nlanes = 1\ntemps = 0\n\n\
+             [captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n\
+             [conventions]\nintegration = \"dev\"\ngate = \"bash remote-gate.sh\"\n",
+        )
+        .unwrap();
+        let task = |repo: &str, base: &str| gear_store::TaskRow {
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: gear_model::TaskState::Ready,
+            priority: "must".into(),
+            lane: None,
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: Vec::new(),
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            repo: Some(repo.into()),
+            base: Some(base.into()),
+            gate: Some("make gate".into()),
+            rework_estimate_min: None,
+            updated: 0,
+        };
+        assert_eq!(
+            config.repo_of_task(&task("/repo", "dev")).gate,
+            "bash remote-gate.sh"
+        );
+        assert_eq!(
+            config.repo_of_task(&task("/repo", "p/feature/f-1")).gate,
+            "make gate"
+        );
+        assert_eq!(config.repo_of_task(&task("/gone", "dev")).gate, "make gate");
+    }
 
     #[test]
     fn names_follow_the_lane_rule() {

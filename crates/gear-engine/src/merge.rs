@@ -3672,14 +3672,6 @@ fn repo_of_op(
         {
             repo.integration = base.to_string();
         }
-        if let Some(gate) = row
-            .gate
-            .as_deref()
-            .map(str::trim)
-            .filter(|gate| !gate.is_empty())
-        {
-            repo.gate = gate.to_string();
-        }
     }
     Ok(repo)
 }
