@@ -4837,7 +4837,21 @@ gate = "true"
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "codex", NOW)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p3", "codex", NOW)?;
             tx.set_seat_state("p:heat", SeatState::Retiring, None, NOW)?;
-            tx.set_seat_state("p:heat", SeatState::Retired, None, NOW)
+            tx.set_seat_state("p:heat", SeatState::Retired, None, NOW)?;
+            // alfred M1: a lane still coming up at the departure's apply is
+            // not retired.
+            tx.insert_seat(&gear_store::SeatRow {
+                id: "p:keel".into(),
+                project: "p".into(),
+                role: SeatRole::Lane,
+                name: "keel".into(),
+                profile: "codex".into(),
+                generation: 0,
+                state: SeatState::Queued,
+                state_since: NOW,
+                state_reason: Some("registered".into()),
+                task_id: None,
+            })
         })
         .unwrap();
         let r = run(
@@ -4846,7 +4860,8 @@ gate = "true"
                 0,
                 "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\
                  ## NEW [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n\
-                 ## NEW [must] lane=hull\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n",
+                 ## NEW [must] lane=hull\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n\
+                 ## NEW [must] lane=keel\ngoal: D\naccept: d\nestimate: 30\ndeps: -\n",
             ),
             "r1",
         )
@@ -6949,7 +6964,15 @@ fn retired_lane_warnings(
         let worked = seats.iter().any(|seat| {
             seat.role == SeatRole::Lane
                 && seat.name == lane
-                && matches!(seat.state, SeatState::Active | SeatState::Standby)
+                // A lane still coming up is not retired (alfred M1: the
+                // departure's apply named every lane while they started).
+                && matches!(
+                    seat.state,
+                    SeatState::Active
+                        | SeatState::Standby
+                        | SeatState::Queued
+                        | SeatState::Starting
+                )
         });
         if worked {
             continue;
