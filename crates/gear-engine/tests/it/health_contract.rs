@@ -473,6 +473,7 @@ fn orphans_in_gear_worktrees_open_one_item_and_are_never_touched() {
         age_s,
         command: "cargo build".into(),
         cwd: cwd.into(),
+        branch: None,
     };
     let mut w = world(vec![
         Reading {
@@ -546,4 +547,37 @@ fn orphans_in_gear_worktrees_open_one_item_and_are_never_touched() {
     let messages = items(&mut w, "health:orphans:p");
     assert_eq!(messages.len(), 1, "{messages:?}");
     assert_eq!(messages[0].state, MsgState::Resolved);
+}
+
+/// A process the captain's own command left running in the captain's worktree
+/// (a local stack a ship started in the background) is the captain's, not a
+/// leftover: only the one in another worktree is named.
+#[test]
+fn a_process_in_the_captains_own_worktree_is_not_named() {
+    let orphan = |pid: u32, cwd: &str, branch: &str| health::Orphan {
+        pid,
+        cpu_pct: 3.0,
+        age_s: 30.0,
+        command: "node".into(),
+        cwd: cwd.into(),
+        branch: Some(branch.into()),
+    };
+    let mut w = world(vec![Reading {
+        machine: fine_machine(),
+        orphans: vec![
+            orphan(800, "/wt/repo/p-captain-m1/web", "p/captain/M1"),
+            orphan(801, "/wt/repo/p-old", "p/old/t9"),
+        ],
+        ..Default::default()
+    }]);
+
+    run(&mut w, 0);
+    let messages = items(&mut w, "health:orphans:p");
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].body.contains("pid 801"), "{}", messages[0].body);
+    assert!(
+        !messages[0].body.contains("pid 800"),
+        "{}",
+        messages[0].body
+    );
 }

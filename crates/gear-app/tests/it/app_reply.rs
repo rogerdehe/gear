@@ -1122,3 +1122,54 @@ fn a_friction_item_without_open_reports_resolves() {
     assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())]);
     assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
 }
+
+/// `gear reply --false-alarm`: an item GEAR raised that was wrong is resolved
+/// with the marked text, so GEAR's own fixes can start from the marked items;
+/// a seat's own question is no false alarm of GEAR's.
+#[test]
+fn a_false_alarm_is_resolved_on_an_engine_item_only() {
+    let mut s = world();
+    let alarm = insert_question(
+        &mut s,
+        "health:orphans:p",
+        "engine",
+        "p:captain",
+        "9 processes left",
+        NOW,
+    );
+    let question = ask(&mut s, "heat", LANE_PANE, "which schema?", "s1", NOW);
+    let mut args = reply_args(&[&alarm], ReplyMode::Resolve, "r1");
+    args.text = format!("{}the captain's own running stack", mail::FALSE_ALARM);
+
+    mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 1,
+    )
+    .unwrap();
+    let row = s.read(|tx| tx.get_message("p", &alarm)).unwrap().unwrap();
+    assert_eq!(row.state, MsgState::Resolved);
+    assert_eq!(
+        row.result.as_deref(),
+        Some("false alarm: the captain's own running stack")
+    );
+
+    args.ids = vec![question.clone()];
+    args.request_id = "r2".into();
+    let refused = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 2,
+    )
+    .unwrap_err();
+    assert!(
+        refused.detail.contains("only an item GEAR raised"),
+        "{}",
+        refused.detail
+    );
+    assert_eq!(state_of(&mut s, &question), MsgState::Open);
+}

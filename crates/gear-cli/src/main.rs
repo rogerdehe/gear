@@ -219,6 +219,10 @@ struct ReplyCmd {
     /// captain's inbox. Nothing is sent to the seat that asked.
     #[arg(long, conflicts_with_all = ["resolve", "wait", "note"])]
     reopen: bool,
+    /// Resolve an item GEAR raised that was wrong: the text says why. Marked
+    /// items are what GEAR's own fixes start from.
+    #[arg(long = "false-alarm", conflicts_with_all = ["wait", "note", "reopen", "downgrade"])]
+    false_alarm: bool,
     #[arg(long)]
     downgrade: bool,
     #[arg(long = "request-id")]
@@ -4223,7 +4227,11 @@ fn run_reply(
     let (mode, wait_on, wait_until) = reply_mode(c, now)?;
     let args = gear_app::mail::ReplyArgs {
         ids: c.ids.clone(),
-        text: c.message.clone(),
+        text: if c.false_alarm {
+            format!("{}{}", gear_app::mail::FALSE_ALARM, c.message)
+        } else {
+            c.message.clone()
+        },
         mode,
         wait_on,
         wait_until,
@@ -5740,6 +5748,7 @@ mod tests {
             until: None,
             note: false,
             reopen: false,
+            false_alarm: false,
             downgrade: false,
             request_id: Some("r-2".into()),
             message: "Use v2".into(),

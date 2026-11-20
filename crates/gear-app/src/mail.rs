@@ -1185,6 +1185,11 @@ pub enum ReplyMode {
     Reopen,
 }
 
+/// The opening of a reply that resolves an item GEAR raised as a false alarm
+/// (`gear reply --false-alarm`): the rest of the text says why it was wrong.
+/// The marked items are where GEAR's own fixes start.
+pub const FALSE_ALARM: &str = "false alarm: ";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyArgs {
     pub ids: Vec<String>,
@@ -1865,6 +1870,19 @@ pub fn reply(
                         }
                         return Err(GearError::new(ErrorCode::BadFormat, detail));
                     }
+                }
+                // A false alarm is GEAR's own mistake: only an item the
+                // engine raised can be one, and it is resolved.
+                if args.text.starts_with(FALSE_ALARM)
+                    && (message.sender != "engine" || args.mode != ReplyMode::Resolve)
+                {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!(
+                            "message {id} is from {}: only an item GEAR raised (from engine) is resolved as a false alarm",
+                            message.sender
+                        ),
+                    ));
                 }
                 originals.push(message);
             }

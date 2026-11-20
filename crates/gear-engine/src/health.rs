@@ -110,6 +110,9 @@ pub struct Orphan {
     pub age_s: f64,
     pub command: String,
     pub cwd: String,
+    /// The branch checked out in the git worktree that holds `cwd`, when one
+    /// does: a process in the captain's own worktree is the captain's.
+    pub branch: Option<String>,
 }
 
 /// One sample of the machine and the fleet.
@@ -770,6 +773,37 @@ fn live_worktrees(store: &mut Store, project: &str) -> GearResult<Vec<String>> {
     Ok(live)
 }
 
+/// The captain's seat branch as a prefix and suffix around its voyage, while
+/// the captain is live: a process in a worktree on that branch (the captain's
+/// own, `<project>/captain/<voyage>` by default) is the captain's, never left
+/// over — a local stack its command started in the background, for one.
+fn captain_branch(store: &mut Store, project: &str) -> GearResult<Option<(String, String)>> {
+    let live = store
+        .read(|tx| tx.captain_of(project))?
+        .is_some_and(|seat| {
+            matches!(
+                seat.state,
+                SeatState::Active | SeatState::Standby | SeatState::Retiring
+            )
+        });
+    if !live {
+        return Ok(None);
+    }
+    let template = store
+        .read(|tx| {
+            Ok(tx
+                .get_project(project)?
+                .and_then(|row| gear_app::config::parse_row(&row).ok())
+                .map(|config| config.conventions.seat_branch))
+        })?
+        .unwrap_or_else(|| gear_model::branch::SEAT_BRANCH.to_string());
+    const MARK: &str = "\u{1}";
+    let branch = gear_model::branch::expand_seat(&template, project, "captain", MARK);
+    Ok(branch
+        .split_once(MARK)
+        .map(|(prefix, suffix)| (prefix.to_string(), suffix.to_string())))
+}
+
 /// T-658: one item names the parentless processes left in GEAR worktrees that
 /// no live seat holds. It only informs: nothing is stopped, no key is sent.
 fn orphans_item(
@@ -780,12 +814,21 @@ fn orphans_item(
     now: Ts,
     watch: &mut Watch,
 ) -> GearResult<()> {
+    let captain = captain_branch(store, project)?;
     let mut reported: Vec<&Orphan> = orphans
         .iter()
         .filter(|orphan| {
             !live
                 .iter()
                 .any(|path| orphan.cwd == *path || orphan.cwd.starts_with(&format!("{path}/")))
+        })
+        .filter(|orphan| match (&captain, &orphan.branch) {
+            (Some((prefix, suffix)), Some(branch)) => {
+                !(branch.len() > prefix.len() + suffix.len()
+                    && branch.starts_with(prefix.as_str())
+                    && branch.ends_with(suffix.as_str()))
+            }
+            _ => true,
         })
         .collect();
     let key = orphans_alert_key(project);
@@ -1158,10 +1201,34 @@ pub fn orphans_in(
             cpu_pct: proc.cpu_pct,
             age_s: proc.age_s,
             command: proc.command.clone(),
+            branch: worktree_branch(std::path::Path::new(&cwd)),
             cwd,
         });
     }
     orphans
+}
+
+/// The branch checked out in the git worktree holding `dir`: the nearest
+/// ancestor with a `.git` file (`gitdir: <path>`) or directory, and the
+/// `ref: refs/heads/<branch>` line of its HEAD. Read without a child process.
+fn worktree_branch(dir: &std::path::Path) -> Option<String> {
+    for dir in dir.ancestors() {
+        let dot_git = dir.join(".git");
+        let git_dir = if dot_git.is_dir() {
+            dot_git
+        } else if let Ok(text) = std::fs::read_to_string(&dot_git) {
+            let path = text.trim().strip_prefix("gitdir:")?.trim().to_string();
+            dir.join(path)
+        } else {
+            continue;
+        };
+        let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+        return head
+            .trim()
+            .strip_prefix("ref: refs/heads/")
+            .map(str::to_string);
+    }
+    None
 }
 
 /// The current directory of a process, read without a child process (T-657).
@@ -1383,6 +1450,31 @@ mod tests {
         assert_eq!(table[1].cpu_s, 3.42);
         assert_eq!(table[1].age_s, 300.0);
         assert_eq!(table[1].command, "/bin/sh -c build");
+    }
+
+    #[test]
+    fn a_linked_worktree_names_its_branch_from_any_directory_below_it() {
+        let root = tempfile::tempdir().unwrap();
+        let git_dir = root.path().join("repo/.git/worktrees/p-captain-m1");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/p/captain/M1\n").unwrap();
+        let worktree = root.path().join("wt/p-captain-m1");
+        std::fs::create_dir_all(worktree.join("web/src")).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            worktree_branch(&worktree.join("web/src")).as_deref(),
+            Some("p/captain/M1")
+        );
+        std::fs::write(git_dir.join("HEAD"), "0123abcd\n").unwrap();
+        assert_eq!(
+            worktree_branch(&worktree),
+            None,
+            "a detached HEAD has no branch"
+        );
     }
 
     #[test]
