@@ -56,6 +56,7 @@ pub mod session;
 mod session_runner;
 pub mod silent;
 pub mod stall;
+pub mod standby;
 pub mod start;
 pub mod switch;
 pub mod tailed;
@@ -697,6 +698,14 @@ pub fn tick(
             let hours = hours::tick(store, herdr, cfg, &profiles, &project, now)?;
             report.hours.extend(hours.events);
             note_slow(report, "hours", step);
+
+            // 1a'. the stand-by: a finished voyage waiting for its landing word
+            //      releases its idle lanes and reviewers, and a lane comes back
+            //      when it has work again.
+            let step = std::time::Instant::now();
+            let standby = standby::tick(store, herdr, cfg, &profiles, &project, now)?;
+            report.hours.extend(standby);
+            note_slow(report, "standby", step);
 
             // 1b. quota: a lane on a provider limit switches model or parks
             //     (design/01 `[models].on_quota`). It runs before the confirm, so a
