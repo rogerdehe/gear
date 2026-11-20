@@ -1246,8 +1246,12 @@ pub(crate) fn release_for_wait(
     }
     // The wait the seat is in: a quota or unreadable park carries a wait that
     // pauses the round; a policy park only has its deadline.
-    let until = match load_wait(store, &seat.id)? {
-        Some(wait) if wait.pause => wait.until,
+    let wait = load_wait(store, &seat.id)?;
+    let standby = wait
+        .as_ref()
+        .is_some_and(|wait| wait.kind == crate::standby::STANDBY);
+    let until = match wait {
+        Some(wait) if wait.pause || standby => wait.until,
         _ => match parked_until(store, &seat.id)? {
             Some(until) => until,
             None => return Ok(None),
@@ -1296,6 +1300,13 @@ pub(crate) fn release_for_wait(
         Outcome::Refused { .. } => return Ok(None),
     }
     meta_set(store, &key, "1")?;
+    // The stand-by tells the captain once for the whole fleet.
+    if standby {
+        return Ok(Some(format!(
+            "{}: released for the landing: its agent exited; its pane and worktree are kept",
+            seat.id
+        )));
+    }
     let line = format!(
         "{}: released for the wait until {until} ({}): its agent exited; its pane, worktree and session are kept",
         seat.id,
@@ -2334,6 +2345,8 @@ fn wake_from_source(
             "the working hours are back",
             "hours: the working hours start again",
         )
+    } else if wait.kind == crate::standby::STANDBY {
+        ("the stand-by is over", "standby: the lane has work again")
     } else {
         ("your quota is back", "quota: the provider is back")
     };
@@ -2384,6 +2397,32 @@ fn wake_from_source(
         "{}: continues after the wait ({})",
         seat.id, wait.kind
     )))
+}
+
+/// The end of a lane's stand-by (see [`crate::standby`]): a released lane
+/// comes back in its pane with its session ([`bring_back`]); a lane whose
+/// agent stayed is woken where it is.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn end_standby(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
+    project: &str,
+    config: &ProjectConfig,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    let released = meta_get(store, &meta_key("wait_released", &seat.id))?.as_deref() == Some("1");
+    if released {
+        return bring_back(store, herdr, cfg, profiles, project, config, seat, now);
+    }
+    let Some(mut wait) = load_wait(store, &seat.id)? else {
+        return Ok(None);
+    };
+    wait.until = now;
+    store.write(|tx| write_wait(tx, &seat.id, &wait))?;
+    wake_from_source(store, project, seat, now)
 }
 
 /// T-327: a lane released for a long wait comes back at the reset in the same
