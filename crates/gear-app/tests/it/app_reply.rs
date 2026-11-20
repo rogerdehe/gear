@@ -1173,3 +1173,49 @@ fn a_false_alarm_is_resolved_on_an_engine_item_only() {
     );
     assert_eq!(state_of(&mut s, &question), MsgState::Open);
 }
+
+/// A false alarm on an item settled elsewhere (a station item, settled by a
+/// plan line) only marks it: the item keeps its state and is not refused.
+#[test]
+fn a_false_alarm_on_a_station_item_marks_it_and_keeps_it_open() {
+    let mut s = world();
+    let station = s
+        .write(|tx| {
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: "p".into(),
+                thread: "station:M1".into(),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: false,
+                body: "Voyage M1 is ready to land".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: NOW,
+            })
+        })
+        .unwrap()
+        .id;
+    let mut args = reply_args(&[&station], ReplyMode::Resolve, "r1");
+    args.text = format!("{}three tasks are still unmerged", mail::FALSE_ALARM);
+
+    mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &args,
+        NOW + 1,
+    )
+    .unwrap();
+    let row = s.read(|tx| tx.get_message("p", &station)).unwrap().unwrap();
+    assert_eq!(row.state, MsgState::Open, "the plan line still settles it");
+    assert_eq!(
+        row.result.as_deref(),
+        Some("false alarm: three tasks are still unmerged")
+    );
+}

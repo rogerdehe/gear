@@ -1792,6 +1792,11 @@ pub fn reply(
             // stored result instead of meeting a closed message.
             let mut originals: Vec<MessageRow> = Vec::new();
             let mut seen: Vec<String> = Vec::new();
+            // A false alarm on an item settled elsewhere (a station, a
+            // friction, a verdict) only marks it: its state stays, and the
+            // place that settles it still does.
+            let false_alarm = args.text.starts_with(FALSE_ALARM);
+            let mut mark_only: Vec<String> = Vec::new();
             for (_, id) in &ids {
                 // A repeated id is handled once; the first place keeps it.
                 if seen.iter().any(|known| known == id) {
@@ -1825,6 +1830,14 @@ pub fn reply(
                 // A station item is settled by a plan `# Decisions` line, not
                 // by a resolve; a note is bookkeeping, and a wait (T-542) asks
                 // the captain's inbox to leave it quiet until its time.
+                let settled_elsewhere = crate::station::is_station(&message)
+                    || crate::friction::close_hint(tx, &ctx.project, &message)?.is_some()
+                    || crate::tasks::verdict_hint(tx, &ctx.project, &message)?.is_some();
+                if false_alarm && message.sender == "engine" && settled_elsewhere {
+                    mark_only.push(message.id.clone());
+                    originals.push(message);
+                    continue;
+                }
                 if crate::station::is_station(&message)
                     && !matches!(args.mode, ReplyMode::Note | ReplyMode::Wait)
                 {
@@ -1892,7 +1905,9 @@ pub fn reply(
             // One answer per (sender, thread).
             let mut answered: Vec<(String, String)> = Vec::new();
             for original in &originals {
+                let mark = mark_only.contains(&original.id);
                 let new_state = match args.mode {
+                    _ if mark => original.state,
                     ReplyMode::Resolve => MsgState::Resolved,
                     ReplyMode::Wait => MsgState::Waiting,
                     ReplyMode::Note => original.state,
@@ -1919,6 +1934,7 @@ pub fn reply(
                 // and the wait fields it had; resolve and wait set their own
                 // (T-103).
                 let (wait_on, wait_until) = match args.mode {
+                    _ if mark => (original.wait_on.clone(), original.wait_until),
                     ReplyMode::Note | ReplyMode::Reopen => {
                         (original.wait_on.clone(), original.wait_until)
                     }
@@ -1938,7 +1954,7 @@ pub fn reply(
                 // A note is the captain's bookkeeping: stored on the item just
                 // above, sent to nobody (T-103). A reopen is the same: the
                 // item is back in the inbox, the captain answers it there.
-                if args.mode == ReplyMode::Note || args.mode == ReplyMode::Reopen {
+                if mark || args.mode == ReplyMode::Note || args.mode == ReplyMode::Reopen {
                     continue;
                 }
 
